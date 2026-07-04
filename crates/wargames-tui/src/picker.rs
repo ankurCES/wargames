@@ -48,7 +48,13 @@ impl Picker {
     pub fn new(countries: Vec<Country>, scenarios: Vec<ScenarioEntry>) -> Self {
         let mut s = ListState::default();
         s.select(Some(0));
-        let mut p = Self {
+        // NOTE: do NOT call rebuild_cache() here. The cache is meaningful only
+        // in Scenario step; pre-computing it on the Country step makes the
+        // renderer surface a phantom "no scenarios match this faction" error
+        // before the player has even pressed Enter. The cache is built
+        // lazily inside `advance()` (Country → Scenario) and inside `next`/
+        // `prev` when the player rotates the country highlight.
+        Self {
             step: PickerStep::Country,
             country_idx: 0,
             scenario_idx: 0,
@@ -57,12 +63,19 @@ impl Picker {
             list_state: s,
             filtered_cache: Vec::new(),
             error: None,
-        };
-        p.rebuild_cache();
-        p
+        }
     }
 
     fn rebuild_cache(&mut self) {
+        // The cache only makes sense after the player has stepped past the
+        // country list. On the Country step, leave both fields empty so the
+        // renderer never paints an empty-state message that doesn't belong
+        // to the current step.
+        if self.step != PickerStep::Scenario {
+            self.filtered_cache.clear();
+            self.error = None;
+            return;
+        }
         let faction = self.countries.get(self.country_idx).map(|c| c.faction);
         // A faction "plays" any scenario tagged for itself OR for any
         // great-power bloc in the same theater of operations. Without this
@@ -429,6 +442,61 @@ mod tests {
         assert!(p.filtered_scenarios().is_empty());
         assert!(p.error.is_some(), "must surface a render-time empty-state message");
         assert!(p.advance() == false, "Enter on an empty list must not advance into the game");
+    }
+
+    /// Regression test for the Phase 9 bug where `Picker::new` called
+    /// `rebuild_cache` eagerly on the Country step. With the default-US
+    /// country selected and a realistic scenario list (some tagged US/NATO/
+    /// Soviet, none tagged DPRK), the renderer must NOT show "no scenarios
+    /// match this faction — press Esc to go back" before the player has
+    /// even pressed Enter on a country.
+    #[test]
+    fn fresh_picker_on_country_step_has_no_error_and_empty_cache() {
+        let scenarios = vec![
+            entry("us_a", Faction::Us),
+            entry("nato_a", Faction::Nato),
+            entry("soviet_a", Faction::Soviet),
+            entry("prc_a", Faction::Prc),
+            // no DPRK scenario — would have triggered the empty-state on a
+            // pre-computed cache for any faction whose tag set didn't match.
+        ];
+        let p = Picker::new(default_countries(), scenarios);
+        assert_eq!(p.step, PickerStep::Country, "fresh picker starts on Country");
+        assert!(
+            p.error.is_none(),
+            "fresh picker must not surface an error before the user advances; got: {:?}",
+            p.error
+        );
+        assert!(
+            p.filtered_cache.is_empty(),
+            "fresh picker must not pre-compute the scenario cache; got: {:?}",
+            p.filtered_cache
+        );
+    }
+
+    /// Defense-in-depth for the same bug: even if some future code path
+    /// leaves a stale `error` set, the renderer must not paint the
+    /// empty-state message while the picker is still on the Country step.
+    /// This exercises the render branch (`error.is_some()`) but with a
+    /// Country-step picker; the test is structural (no Frame), but the
+    /// invariant `step == Country ⇒ no error displayed` is what we care
+    /// about, so we encode it as a precondition the render path enforces.
+    #[test]
+    fn stale_error_on_country_step_is_cleared_by_rebuild_cache() {
+        let scenarios = vec![entry("us_a", Faction::Us)];
+        let mut p = Picker::new(default_countries(), scenarios);
+        // Stale error — would have come from a previous scenario pick or a
+        // pre-computed cache if `rebuild_cache` were called eagerly.
+        p.error = Some("stale".into());
+        // Force a rebuild (defensive — happens on advance()/next()/prev()).
+        // The fix in `rebuild_cache` clears error on Country step.
+        p.rebuild_cache();
+        assert_eq!(p.step, PickerStep::Country);
+        assert!(
+            p.error.is_none(),
+            "rebuild_cache must clear any stale error on the Country step; got: {:?}",
+            p.error
+        );
     }
 
     /// End-to-end reachability proof: every supported faction can move from
