@@ -810,3 +810,78 @@ every faction, not just US.
   and the loading affordance means the user can no longer mistake a real
   load for a hang.
 
+
+## 13. Phase 9.6 — Fix phantom "no scenarios" empty-state on Country step
+
+After Phase 9.5 shipped, the user reported: *"no scenarios match this
+faction — press Esc to go back" appears before I have even picked a
+country.* Root cause was a Phase 9 wiring bug that survived because
+the existing picker tests never exercised a fresh `Picker::new`.
+
+### 13.1 The bug
+
+`Picker::new` was calling `rebuild_cache()` eagerly during
+construction. With `country_idx = 0` (default US) and the visibility
+matrix that ships in production, this set
+`error: Some("no scenarios match this faction…")` on the **Country**
+step — before the user had advanced. The renderer then painted the
+empty-state on the wrong step, exactly matching the user's report.
+
+The Phase 9.5 playability test (`every_faction_advances_to_scenarios_
+with_results`) did not catch this because it called `p.advance()`
+first, which rebuilds the cache and clears the stale `error` on the
+way to the Scenario step.
+
+### 13.2 The fix
+
+`crates/wargames-tui/src/picker.rs`:
+
+* `Picker::new` no longer calls `rebuild_cache`. The cache is built
+  lazily inside `advance()` (Country → Scenario) and on `next`/
+  `prev` when the player rotates the country highlight.
+* `rebuild_cache` early-returns on `step != Scenario`, clearing both
+  `filtered_cache` and `error`. Defense-in-depth so any future caller
+  can't reintroduce the bug.
+
+### 13.3 Regression tests
+
+Two new tests in `crates/wargames-tui/src/picker.rs`:
+
+* `fresh_picker_on_country_step_has_no_error_and_empty_cache` —
+  constructs `Picker::new` with `default_countries()` + a realistic
+  scenario list and asserts `error.is_none()` and `filtered_cache`
+  is empty on the Country step. **This test would have caught the
+  Phase 9 bug.**
+* `stale_error_on_country_step_is_cleared_by_rebuild_cache` — sets a
+  stale `error`, calls `rebuild_cache` on Country step, asserts the
+  error is cleared.
+
+### 13.4 Files changed (commit `a270616`)
+
+| File | Change | md5 |
+|---|---|---|
+| `crates/wargames-tui/src/picker.rs` | `Picker::new` no longer pre-computes; `rebuild_cache` clears on Country step; +2 regression tests | `…` |
+
+### 13.5 Acceptance
+
+- A fresh `Picker::new` with default countries + any scenario list
+  must have `error.is_none()` and `filtered_cache.is_empty()` on the
+  Country step. Proven by
+  `picker::tests::fresh_picker_on_country_step_has_no_error_and_empty_cache`.
+- Pressing Enter on a country transitions to the Scenario step,
+  shows the spinner overlay for ~900 ms (Phase 9.5), and presents the
+  filtered scenario list. The picker no longer surfaces the empty-
+  state message on the wrong step. Proven end-to-end by
+  `picker::tests::every_faction_advances_to_scenarios_with_results`
+  + 14 other picker tests.
+- 15/15 tui unit tests green; `cargo build -p wargames-tui --release`
+  clean; `bash scripts/smoke.sh` all green.
+
+### 13.6 Why Phase 9.6 closes (a)
+
+* **(a)** Fixed end-to-end. The phantom empty-state on Country step
+  no longer fires. The country→scenario transition is verified by the
+  pre-existing `every_faction_advances_to_scenarios_with_results`
+  test, which still passes after the fix.
+* **(b) (c)** Phase 9.5 already shipped these; Phase 9.6 didn't touch
+  the spinner widget or the game loop.
