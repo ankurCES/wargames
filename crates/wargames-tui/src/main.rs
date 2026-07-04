@@ -30,9 +30,14 @@ use tokio::runtime::Runtime;
 #[derive(Parser, Debug)]
 #[command(name = "wargames", version, about = "WOPR-style war game TUI")]
 struct Cli {
-    /// Directory containing scenario JSON files.
-    #[arg(long, default_value = "scenarios")]
-    scenarios_dir: PathBuf,
+    /// Directory containing scenario JSON files. Defaults to the
+    /// installer's data directory (`$XDG_DATA_HOME/wargames/scenarios/`,
+    /// or `~/.local/share/wargames/scenarios/` if XDG is unset) so the
+    /// installed binary finds its bundled scenarios without the user
+    /// having to point at a path. Pass `--scenarios-dir scenarios` to
+    /// run against an in-source tree.
+    #[arg(long)]
+    scenarios_dir: Option<PathBuf>,
     /// Print the resolved settings path and exit.
     #[arg(long)]
     print_config_path: bool,
@@ -40,6 +45,25 @@ struct Cli {
     /// Mostly useful for the e2e smoke test.
     #[arg(long)]
     skip_splash: bool,
+}
+
+/// Resolve the default scenarios directory at runtime: prefer
+/// `$XDG_DATA_HOME/wargames/scenarios`, fall back to
+/// `$HOME/.local/share/wargames/scenarios`. The installer
+/// (`scripts/install.sh`) populates this directory with the bundled
+/// `scenarios/*.json` files so the installed binary can find its
+/// data without the user passing `--scenarios-dir` or running from
+/// inside a source tree. The path may not exist at startup (the user
+/// might have deleted it); `App::new` → `resolve_scenarios_dir` will
+/// fall through to other candidates before giving up.
+fn default_scenarios_dir() -> PathBuf {
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local").join("share")))
+        .unwrap_or_else(|| PathBuf::from("/usr/local/share"));
+    base.join("wargames").join("scenarios")
 }
 
 fn main() -> std::process::ExitCode {
@@ -70,7 +94,17 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    let mut app = App::new(settings, cli.scenarios_dir);
+    // Resolve the scenarios directory: --scenarios-dir wins; otherwise use
+    // the XDG data dir the installer populates (`scripts/install.sh` copies
+    // the bundled `scenarios/` here). This keeps the installed binary
+    // self-sufficient — the user doesn't need to cd into a source tree or
+    // pass a path. The old default of "scenarios" (relative) silently
+    // produced an empty picker post-install, which was the (a) bug.
+    let scenarios_dir = cli
+        .scenarios_dir
+        .unwrap_or_else(default_scenarios_dir);
+
+    let mut app = App::new(settings, scenarios_dir);
     if cli.skip_splash {
         app.skip_splash();
     }

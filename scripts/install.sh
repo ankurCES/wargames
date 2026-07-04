@@ -93,6 +93,31 @@ do_install() {
     mkdir -p "$INSTALL_DIR"
     install -m 0755 "$SCRATCH_DIR/src/target/release/$BIN_NAME" "$INSTALL_DIR/$BIN_NAME"
     log "installed $INSTALL_DIR/$BIN_NAME"
+
+    # Ship the bundled scenarios alongside the binary so the installed
+    # user can run without pointing --scenarios-dir somewhere. Mirror the
+    # logic in `default_scenarios_dir()` (main.rs): $XDG_DATA_HOME first,
+    # then $HOME/.local/share, then /usr/local/share as a last resort.
+    local data_base="${WARGAMES_DATA_DIR:-}"
+    if [[ -z "$data_base" ]]; then
+        if [[ -n "${XDG_DATA_HOME:-}" ]]; then
+            data_base="$XDG_DATA_HOME"
+        elif [[ -n "${HOME:-}" ]]; then
+            data_base="$HOME/.local/share"
+        else
+            data_base="/usr/local/share"
+        fi
+    fi
+    local data_dir="$data_base/wargames/scenarios"
+    if [[ -d "$SCRATCH_DIR/src/scenarios" ]]; then
+        mkdir -p "$data_dir"
+        # Idempotent install — only copy if source is newer or dest missing.
+        install -m 0644 "$SCRATCH_DIR/src/scenarios/"*.json "$data_dir/" 2>/dev/null || \
+            cp "$SCRATCH_DIR/src/scenarios/"*.json "$data_dir/"
+        log "installed scenarios to $data_dir"
+    else
+        log "warning: scenarios dir not found at $SCRATCH_DIR/src/scenarios — TUI may fail to load"
+    fi
 }
 
 # ---------------------------------------------------------------- 5. config check
