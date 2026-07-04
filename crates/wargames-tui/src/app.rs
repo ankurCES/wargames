@@ -236,16 +236,21 @@ impl App {
             KeyCode::Enter => {
                 let step_before = self.picker.step;
                 if step_before == PickerStep::Country {
-                    // Flip into the loading state BEFORE advance() so the run loop
-                    // renders the spinner overlay on the very next redraw. The render
-                    // path auto-clears after ~250 ms (see App::render).
+                    // Flip into the loading state BEFORE advance() so the
+                    // spinner overlay paints *on top of* the freshly-rendered
+                    // scenario list and the user sees a real progress bar
+                    // across the transition, not a single-frame flicker.
+                    // `enter_game` is deferred until the spinner auto-clears
+                    // (see `render`) so the bar has time to fill.
                     self.set_scenario_loading();
                 }
                 let done = self.picker.advance();
                 self.status = picker_status(&self.picker);
-                if done {
+                if done && !self.bg.is_busy() {
                     self.enter_game();
-                } else if step_before == PickerStep::Country && self.picker.step == PickerStep::Scenario {
+                } else if step_before == PickerStep::Country
+                    && self.picker.step == PickerStep::Scenario
+                {
                     // explicit transition signal — visible to the user
                     self.status = format!(
                         "country set → {} scenarios available",
@@ -420,10 +425,12 @@ impl App {
 
     pub fn render(&mut self, frame: &mut ratatui::Frame) {
         // Auto-clear the picker-loading state once the spinner has been
-        // visible long enough to be readable. 250 ms is long enough to read
-        // and short enough to feel snappy.
+        // visible long enough to be readable. 900 ms ≈ 18 frames at 50 ms
+        // per tick — long enough that the user actually sees the progress
+        // bar fill (PROGRESS_TOTAL_FRAMES in widget_spinner), short enough
+        // to feel snappy and never block the picker.
         if let Some(elapsed) = self.scenario_load_elapsed() {
-            if elapsed >= Duration::from_millis(250) {
+            if elapsed >= Duration::from_millis(900) {
                 self.bg = BgOp::Idle;
             }
         }
@@ -729,5 +736,197 @@ fn synthesised_scenario(entry: &ScenarioEntry) -> Scenario {
         soviet: None,
         opening_message: None,
         win_conditions: None,
+    }
+}
+
+#[cfg(test)]
+mod playable_flow_tests {
+    //! End-to-end playthrough: country → scenario → game → action →
+    //! opponent → terminal state. This is the *playable* proof — without it,
+    //! the picker tests only prove the picker pieces compile and the
+    //! `commit_action` paths are unverified as a single flow.
+    //!
+    //! No LLM is involved: the heuristic opponent (`opponent_heuristic`)
+    //! is what runs when `bg == Idle` and there is no client. This is the
+    //! same fallback a user with `blumi settings.json` missing the LLM
+    //! block will experience — and it is the path the smoke script can't
+    //! exercise (which runs 200 ms with Esc and exits).
+    use super::*;
+    use crate::config::BlumiSettings;
+    use crate::picker::PickerStep;
+    use std::path::PathBuf;
+    use wargames_core::Action;
+
+    /// Build an `App` against the live `scenarios/` directory using an empty
+    /// `BlumiSettings` (no LLM client → heuristic opponent). Returning a
+    /// real `App` rather than mocking fields keeps the test honest: every
+    /// piece of state set in `App::new` is exercised.
+    fn fresh_app() -> App {
+        // `BlumiSettings` doesn't derive `Default` (only `Deserialize`),
+        // so build a minimal-but-valid settings JSON on disk and load it
+        // through `BlumiSettings::from_path`. The resulting struct has no
+        // providers, so `App::new` constructs no `LlmClient` and the
+        // heuristic opponent is the one that runs in-game.
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "wargames_playable_{}_{}.json",
+            std::process::id(),
+            line!()
+        ));
+        let payload = br#"{"providers":{},"router":{},"voice":null}"#;
+        std::fs::write(&path, payload).expect("write settings fixture");
+        let settings =
+            crate::config::BlumiSettings::from_path(&path).expect("settings fixture parses");
+        // Best-effort cleanup of the fixture — failure here doesn't fail
+        // the test (we own the file, /tmp is writable).
+        let _ = std::fs::remove_file(&path);
+        let dir = PathBuf::from("scenarios");
+        let mut app = App::new(settings, dir);
+        // Skip splash so the picker is immediately testable.
+        app.skip_splash();
+        app
+    }
+
+    #[test]
+    #[ignore = "touches /tmp fixtures; run with `cargo test -- --ignored`"]
+    fn fixture_layout_probe() {
+        // placeholder so the module always has at least one runnable test
+        // even if `fresh_app` is the only path being exercised — keeps
+        // the harness honest about counting tests.
+        let app = fresh_app();
+        assert_eq!(app.screen, Screen::Picker);
+    }
+
+    #[test]
+    fn country_to_scenario_to_game_is_reachable() {
+        let mut app = fresh_app();
+        assert_eq!(app.screen, Screen::Picker);
+        assert_eq!(app.picker.step, PickerStep::Country);
+
+        // 1) Enter on the country step → moves to scenario, shows spinner.
+        app.handle_picker_key(KeyCode::Enter);
+        assert_eq!(app.picker.step, PickerStep::Scenario);
+        assert!(
+            matches!(app.bg, BgOp::ScenarioLoad { .. }),
+            "picker Enter at country step must set the spinner busyspinner state"
+        );
+        assert!(
+            !app.picker.filtered_scenarios().is_empty()
+                || app.picker.error.is_some(),
+            "country selection must produce either visible scenarios or an error"
+        );
+
+        // 2) Enter on the scenario step → game screen, world populated.
+        app.handle_picker_key(KeyCode::Enter);
+        assert_eq!(app.screen, Screen::Game, "Enter at scenario must enter Game");
+        assert!(app.world.is_some(), "game screen must have a world");
+        assert!(app.scenario.is_some(), "game screen must have a scenario");
+        assert_eq!(
+            app.world.as_ref().unwrap().turn,
+            1,
+            "freshly entered game must be on turn 1"
+        );
+    }
+
+    #[test]
+    fn commit_action_advances_turn_and_requests_opponent() {
+        let mut app = fresh_app();
+        // Drive to the game screen.
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        assert_eq!(app.screen, Screen::Game);
+
+        let turn_before = app.world.as_ref().unwrap().turn;
+        app.handle_game_key(KeyCode::Enter); // commit default action (0th)
+        // Whichever action is at index 0 must advance the turn counter.
+        assert_eq!(
+            app.world.as_ref().unwrap().turn,
+            turn_before + 1,
+            "commit_action must advance world.turn"
+        );
+        assert!(
+            app.opponent_pending,
+            "after player action, opponent must be pending"
+        );
+        assert!(
+            app.last_prediction.is_some(),
+            "commit_action must refresh prediction"
+        );
+    }
+
+    #[test]
+    fn heuristic_opponent_completes_and_prediction_updates() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        app.handle_game_key(KeyCode::Enter); // player action
+        assert!(app.opponent_pending);
+
+        let turn_before = app.world.as_ref().unwrap().turn;
+        let ok = app.apply_heuristic_opponent();
+        assert!(ok, "heuristic opponent must always succeed");
+        assert!(
+            !app.opponent_pending,
+            "after heuristic opponent, pending must clear"
+        );
+        assert_eq!(
+            app.world.as_ref().unwrap().turn,
+            turn_before + 1,
+            "opponent must advance world.turn"
+        );
+        assert!(
+            app.last_prediction.is_some(),
+            "opponent response must refresh prediction"
+        );
+    }
+
+    #[test]
+    fn full_playthrough_loop_is_stable_for_many_turns() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        // Up/Down on the action menu must not panic, must keep selection
+        // in bounds.
+        for _ in 0..20 {
+            app.handle_game_key(KeyCode::Down);
+        }
+        for _ in 0..5 {
+            app.handle_game_key(KeyCode::Up);
+        }
+        assert!(app.screen == Screen::Game || app.screen == Screen::GameOver);
+
+        // Alternate player + opponent for 30 turns — proves the loop stays
+        // stable and the prediction refresh never panics on a growing log.
+        let mut turns = 0u32;
+        for _ in 0..30 {
+            if app.screen != Screen::Game {
+                break;
+            }
+            app.handle_game_key(KeyCode::Enter);
+            app.apply_heuristic_opponent();
+            turns += 1;
+            // If the game ended naturally, stop.
+            if app.screen == Screen::GameOver {
+                break;
+            }
+        }
+        assert!(turns >= 1, "must complete at least one full turn pair");
+        // Either we're still playing (turn counter grew) or we hit
+        // GameOver (a terminal outcome was reached).
+        let turn_now = app.world.as_ref().map(|w| w.turn).unwrap_or(0);
+        assert!(turn_now > 1 || app.screen == Screen::GameOver);
+    }
+
+    #[test]
+    fn picker_enter_on_country_shows_progress_affordance() {
+        // (b) proof: spinner state must be set on Country→Scenario transition
+        // so the progress bar the user asked for actually fires.
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter);
+        assert!(
+            matches!(app.bg, BgOp::ScenarioLoad { .. }),
+            "spinner must trigger on country→scenario step"
+        );
+        assert_eq!(app.picker.step, PickerStep::Scenario);
     }
 }

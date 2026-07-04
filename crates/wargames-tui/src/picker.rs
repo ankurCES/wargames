@@ -430,4 +430,87 @@ mod tests {
         assert!(p.error.is_some(), "must surface a render-time empty-state message");
         assert!(p.advance() == false, "Enter on an empty list must not advance into the game");
     }
+
+    /// End-to-end reachability proof: every supported faction can move from
+    /// the country step to the scenario step and see at least one scenario.
+    /// This is the playability precondition for `(c)` — without it, every
+    /// faction has at least one reachability gap that silently strands the
+    /// user on a blank list.
+    #[test]
+    fn every_faction_advances_to_scenarios_with_results() {
+        use std::collections::HashSet;
+        // Visibility matrix (must agree with `rebuild_cache`):
+        //   Us     → Us | Nato | Soviet
+        //   Nato   → Nato | Us
+        //   Soviet → Soviet | Nato | Us
+        //   Prc    → Prc | Us | Nato | Soviet
+        //   Dprk   → Us | Nato
+        // Every faction in this test pool has at least one scenario in the
+        // fully-stocked fixture below — so the player is never left with an
+        // empty visible list after picking a country.
+        let scenarios = vec![
+            entry("us_a", Faction::Us),
+            entry("nato_a", Faction::Nato),
+            entry("soviet_a", Faction::Soviet),
+            entry("prc_a", Faction::Prc),
+            entry("dprk_a", Faction::Dprk),
+        ];
+        let cases = [
+            (Faction::Us, &["us_a", "nato_a", "soviet_a"][..]),
+            (Faction::Nato, &["us_a", "nato_a"][..]),
+            (Faction::Soviet, &["us_a", "nato_a", "soviet_a"][..]),
+            (Faction::Prc, &["us_a", "nato_a", "soviet_a", "prc_a"][..]),
+            (Faction::Dprk, &["us_a", "nato_a"][..]),
+        ];
+        for (faction, expected_visible) in cases {
+            let mut p = Picker::new(
+                vec![Country { faction, hint: "".into() }],
+                scenarios.clone(),
+            );
+            // advance() returns `true` only at the *second* call (when the
+            // picker is on the scenario step AND the player confirms a
+            // scenario to enter the game). The first call is the
+            // Country→Scenario transition and always returns `false`. So
+            // we test the precondition for entry into the game: after the
+            // first advance(), the picker must be on the scenario step
+            // with at least one visible scenario.
+            let transitioned = p.advance();
+            assert!(
+                !transitioned,
+                "{faction:?}: advance() at country step must return false (it is the transition arm, not the 'enter game' arm)"
+            );
+            assert_eq!(
+                p.step,
+                PickerStep::Scenario,
+                "{faction:?}: must be on the scenario step after advance()"
+            );
+            assert!(
+                !p.filtered_scenarios().is_empty(),
+                "{faction:?}: must see at least one scenario after picking a country"
+            );
+            assert!(
+                p.error.is_none(),
+                "{faction:?}: must not surface an empty-state error when scenarios exist"
+            );
+
+            // Confirm the visibility set matches the documented matrix.
+            let seen: HashSet<&str> = p
+                .filtered_scenarios()
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect();
+            let expected: HashSet<&str> = expected_visible.iter().copied().collect();
+            assert_eq!(
+                seen, expected,
+                "{faction:?}: visibility matrix regression (expected {expected:?}, got {seen:?})"
+            );
+
+            // And the second advance() — picking a scenario — must succeed.
+            let entered_game = p.advance();
+            assert!(
+                entered_game,
+                "{faction:?}: second advance() at scenario step must succeed"
+            );
+        }
+    }
 }
