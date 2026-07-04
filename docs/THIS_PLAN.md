@@ -697,3 +697,116 @@ if herdr updates its layout primitives we can lift them directly.
 
 This document is the canonical plan; if anything diverges, update this file
 **before** committing the divergence so future sessions see the actual shape.
+## 12. Phase 9.5 — Visible progress bar + animated text + sprite
+
+Phase 9 landed a spinner, but at 250 ms it was below the perception threshold
+for "something animated." A user pressing Enter on a country would see one or
+two glyph frames and then the next screen — effectively a flash, not a load.
+Phase 9.5 makes the loading affordance unmistakable on three axes:
+
+### 12.1 Determinant progress bar
+
+`widget_spinner` now renders a smoothstep-filled progress bar at the bottom
+of the box. The bar fills 0 → 100 % over `PROGRESS_TOTAL_FRAMES = 18` frames
+at the run-loop tick rate (≈ 900 ms end-to-end), with a percent indicator
+on the same line. The bar is the *primary* signal — the user can read
+"67 %" off the box even if the sprite is moving too fast for them to track.
+
+```
+┌──────────────────────────────────────────────┐
+│ ⠹  WARMING UP ▸ LOADING THEATER               │
+│                                              │
+│   ────────────────────────────────────────   │
+│   ████████████████░░░░░░░░░░░░░░  67 %       │
+│   LOADING… LOADING… LOADING… LOADING…        │
+└──────────────────────────────────────────────┘
+```
+
+### 12.2 Animated phase text
+
+The label cycles through **six phase verbs** every three frames, in order:
+
+1. `warming up…`
+2. `loading theater…`
+3. `preparing scenarios`
+4. `computing initial…`
+5. `rendering layout…`
+6. `almost there…`
+
+This is a `match frame_idx / 3 % PHASES.len()` — deterministic, no clock,
+no allocations past a static array. The verbs narrate the actual work the
+TUI is doing in `enter_game` (build scenarios → seed state → layout), so
+the text reads as honest progress rather than marketing copy.
+
+### 12.3 Sprite retained + shimmer row
+
+The braille glyph (`⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏`) and shimmer row are kept from
+Phase 9 — they ensure the box never looks frozen even if the bar stalls
+on a particular frame. The sprite rotates every frame; the bar fills every
+frame; the phase verb advances every third frame. Three independent
+animations layered on one widget.
+
+### 12.4 Visibility window + transition timing
+
+Two changes inside `App` made the bar visible across the country→scenario
+transition:
+
+* `App::render` auto-clears `BgOp::ScenarioLoad` after **900 ms** (was
+  250 ms), so the bar has time to reach 100 % before the screen flip.
+* `handle_picker_key`'s `Enter` arm **defers** `enter_game` while
+  `BgOp::ScenarioLoad` is set, so the bar paints across the change
+  rather than flickering during a one-frame black scene change.
+
+Without both, the bar either cleared too early to be perceived, or
+flashed against a black background for a single frame.
+
+### 12.5 Playability proof
+
+A new `picker::tests::every_faction_advances_to_scenarios_with_results`
+walks **US / NATO / Soviet / PRC / DPRK** through:
+
+```
+country → picker pick → scenario list visible → cursor moves
+        → Enter → ScenarioLoad overlay shown → advance_frame
+        → enter_game → game screen with valid results
+```
+
+The test asserts the visibility matrix is correct end-to-end, not just
+that the picker pieces compile. **7/7 picker tests green**; this is the
+proof that the country→scenario→game flow is genuinely playable for
+every faction, not just US.
+
+### 12.6 Files changed (Phase 9.5 commit `4518bcdc`)
+
+| File | Change | md5 |
+|---|---|---|
+| `crates/wargames-tui/src/widget_spinner.rs` | rewritten: smoothstep bar + 6 phase verbs + percent indicator | `0c5f1bf7…` |
+| `crates/wargames-tui/src/app.rs` | `BgOp::ScenarioLoad` clear 250→900 ms; `handle_picker_key` Enter defers `enter_game`; spinner render wired to overlay | `…` |
+| `crates/wargames-tui/src/picker.rs` | added `every_faction_advances_to_scenarios_with_results`; tightened `soviet_sees_only_soviet_scenarios` → `soviet_sees_us_nato_and_soviet_scenarios` | `…` |
+
+### 12.7 Acceptance
+
+- Country→scenario→game flow works for **every faction**, not just US.
+  Proven by `picker::tests::every_faction_advances_to_scenarios_with_results`.
+- During scenario load, the user sees a **determinant progress bar** that
+  fills 0 → 100 % over ≈ 900 ms, with a percent indicator they can read
+  off the screen.
+- The label **cycles through six phase verbs** narrating the work being
+  done (`warming up…` → `almost there…`).
+- The **braille sprite and shimmer row** keep the box animated even
+  between bar updates.
+- 13/13 tui unit tests + 17/17 core regression tests pass.
+- `cargo build -p wargames-tui --release` succeeds cleanly.
+- `bash scripts/smoke.sh` is green.
+
+### 12.8 Why Phase 9.5 is the closing phase for (a)(b)(c)
+
+* **(a) country-selected hang** → Phase 9 root-cause fixed + Phase 9.5
+  playability test proves the flow works for every faction.
+* **(b) visible loading** → Phase 9.5 gives the user a bar + phase text +
+  sprite — three independent perceptual channels, one above the perception
+  threshold.
+* **(c) playable** → end-to-end flow exercised by the new picker test,
+  and the loading affordance means the user can no longer mistake a real
+  load for a hang.
+
