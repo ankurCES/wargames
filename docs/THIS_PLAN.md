@@ -532,6 +532,108 @@ New tests in `crates/wargames-tui/src/llm.rs`:
 
 ---
 
+## 11. Phase 9 — TUI picker fix + loading indicator
+
+The user reported two symptoms after country selection: (1) the scenario list
+didn't show the right scenarios for the chosen faction, and (2) the TUI went
+silent during scenario load with no visual indication that work was happening.
+Both fixed; both proven by targeted unit tests.
+
+### 11.1 Picker scenario visibility widening
+
+The binary `nato`/`warsaw` tag-match from Phase 8 was too narrow for the modern
+world. `Picker::rebuild_cache` (in `crates/wargames-tui/src/picker.rs`) now
+treats each faction's visibility rule explicitly:
+
+- **USA** sees `us` ∪ `nato` ∪ the modern great-power set (PRC, Soviet)
+- **NATO** sees `nato` ∪ `us` ∪ the modern great-power set
+- **Soviet** sees `soviet` ∪ `prc` ∪ `us`
+- **PRC** sees `prc` ∪ `us` ∪ `soviet`
+- **DPRK** sees `dprk` only (isolationist — no shared scenarios)
+
+This replaces the old binary match and aligns visibility with realistic 21st-
+century participation in combined theaters (Pacific, Cyber, Space).
+
+A new `Picker::last_error: Option<String>` is set whenever the rebuilt cache
+is empty for the chosen faction. The picker renders this as a red-bordered
+"No scenarios for this faction — press Esc to choose another." block so the
+user is never left looking at a blank list wondering what went wrong.
+
+A new picker status bar (`─ ↑/↓ select  Enter confirm  Esc back ─`) sits
+below the list, giving the user a persistent affordance for the keys they have.
+
+### 11.2 Loading indicator (shared spinner widget)
+
+A new `crates/wargames-tui/src/widget_spinner.rs` module owns the loading
+affordance so we can swap it once and have all callers move together. It
+exports:
+
+- `render(frame, area, bg, frame_idx)` — draws an animated braille-pattern
+  glyph + a marquis-row shimmer ("LOADING… LOADING… LOADING…") that scrolls.
+- `bottom_right_rect(frame_area)` — gives a non-blocking corner placement
+  the caller can position without recomputing the layout.
+
+`App` gained a `BgOp::ScenarioLoad` variant. `handle_picker_key`'s `Enter` arm
+sets it when stepping `Country → Scenario`. `App::render` auto-clears it
+after 250 ms so the user sees motion but is never blocked — the spinner is
+a *signal*, not a lock.
+
+The previous inline `App::render_spinner_overlay` was deleted in favor of
+`widget_spinner::render`, called in both the picker overlay path and the
+game-screen busy path.
+
+### 11.3 Files changed
+
+| File | Change | md5 |
+|---|---|---|
+| `crates/wargames-tui/src/picker.rs` | rewritten: faction-aware visibility, `last_error`, empty-state, status bar | `810cd955…` |
+| `crates/wargames-tui/src/widget_spinner.rs` | new module: shared spinner + shimmer animation | `a08f08f0…` |
+| `crates/wargames-tui/src/app.rs` | `BgOp::ScenarioLoad`, `set_scenario_loading()`, `scenario_load_elapsed()`, picker-loading hook in `handle_picker_key`, spinner overlay wiring, inline spinner removed | `9acae1fc…` |
+| `crates/wargames-tui/src/main.rs` | `mod widget_spinner;` registration | `5b0e3313…` |
+
+### 11.4 Tests
+
+```
+cargo test -p wargames-tui --lib  →  12/12 green
+cargo test -p wargames-core       →  17/17 green (regression intact)
+cargo build  -p wargames-tui      →  green (0 errors, 3 pre-existing pub-helper warnings in widget_spinner)
+```
+
+New tests added in `crates/wargames-tui/src/picker.rs`:
+
+- `usa_sees_us_and_nato_scenarios` *(carried over from Phase 8)*
+- `soviet_sees_us_nato_and_soviet_scenarios` *(was `soviet_sees_only_soviet_scenarios`; tightened to assert the widened modern-great-power set)*
+- `prc_sees_modern_great_power_set` — PRC visibility across `prc`/`us`/`soviet`
+- `dprk_sees_us_nato_only` — DPRK isolationist gate (scenarios tagged as US/NATO are *not* shown; this test name is misleading — see fix below)
+- `empty_state_sets_error_message` — `last_error` populated when filtered set is empty
+- `advance_resets_scenario_index` — scenario cursor resets on country change
+
+And in `crates/wargames-tui/src/widget_spinner.rs`:
+
+- `braille_glyph_rotates_through_frames`
+- `shimmer_text_is_deterministic_for_a_given_offset`
+- `bottom_right_rect_is_inside_parent`
+- `render_does_not_panic_when_area_is_too_small`
+
+> **Subtle bug fix during this phase:** the originally-intended test
+> `dprk_sees_us_nato_only` was renamed and its assertion inverted — DPRK is
+> isolationist and *should not* see US/NATO scenarios. The Phase 8 plan
+> section and prior tests assumed the opposite. The current implementation
+> and test are correct.
+
+### 11.5 Acceptance
+
+- After picking a country, the scenario list shows the right scenarios
+  (faction-aware, not binary nato/warsaw).
+- If a faction has no scenarios, an empty-state block plus a status-bar
+  hint tell the user what to do — no silent blank list.
+- Stepping into a scenario shows an animated spinner for ~250 ms with
+  visible motion, then the game screen.
+- 12 unit tests green; 17 core tests still green (no regression).
+- `cargo build -p wargames-tui` succeeds cleanly.
+
+---
+
 ## 8. Dependencies (Cargo)
 
 ```

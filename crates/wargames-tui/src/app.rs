@@ -17,6 +17,7 @@ use crate::widget_action::{render as render_action, ALL_ACTIONS};
 use crate::widget_log::render as render_log;
 use crate::widget_predict::render as render_predict;
 use crate::widget_radar::render as render_radar;
+use crate::widget_spinner;
 use crate::widget_state::render as render_state;
 use ratatui::widgets::ListState;
 use std::path::PathBuf;
@@ -45,6 +46,8 @@ pub enum BgOp {
     LlmCall { started_at: Instant },
     /// A Monte Carlo prediction is being recomputed.
     Predict { started_at: Instant },
+    /// Scenario list is being rebuilt or a scenario JSON is being loaded.
+    ScenarioLoad { started_at: Instant },
 }
 
 impl BgOp {
@@ -56,6 +59,7 @@ impl BgOp {
             BgOp::Idle => "",
             BgOp::LlmCall { .. } => "thinking…",
             BgOp::Predict { .. } => "computing predictions…",
+            BgOp::ScenarioLoad { .. } => "loading scenarios…",
         }
     }
 }
@@ -151,6 +155,25 @@ impl App {
         self.bg = BgOp::Idle;
     }
 
+    /// Flip into the loading state for the country→scenario transition. The
+    /// spinner renders while `bg == ScenarioLoad`; the run loop's render path
+    /// auto-clears it after ~250 ms so the user always sees motion but never
+    /// gets stuck.
+    pub fn set_scenario_loading(&mut self) {
+        self.bg = BgOp::ScenarioLoad {
+            started_at: Instant::now(),
+        };
+    }
+
+    /// How long the picker-load spinner has been visible. Used by `render`
+    /// to auto-clear so the user is never stuck behind the overlay.
+    pub fn scenario_load_elapsed(&self) -> Option<Duration> {
+        match self.bg {
+            BgOp::ScenarioLoad { started_at } => Some(started_at.elapsed()),
+            _ => None,
+        }
+    }
+
     /// Compute a snapshot of the LLM-visible state (kept identical to the
     /// JS impl's `stateForLLM`).
     pub fn llm_state_snapshot(&self) -> Option<serde_json::Value> {
@@ -212,6 +235,12 @@ impl App {
             }
             KeyCode::Enter => {
                 let step_before = self.picker.step;
+                if step_before == PickerStep::Country {
+                    // Flip into the loading state BEFORE advance() so the run loop
+                    // renders the spinner overlay on the very next redraw. The render
+                    // path auto-clears after ~250 ms (see App::render).
+                    self.set_scenario_loading();
+                }
                 let done = self.picker.advance();
                 self.status = picker_status(&self.picker);
                 if done {
@@ -390,6 +419,14 @@ impl App {
     }
 
     pub fn render(&mut self, frame: &mut ratatui::Frame) {
+        // Auto-clear the picker-loading state once the spinner has been
+        // visible long enough to be readable. 250 ms is long enough to read
+        // and short enough to feel snappy.
+        if let Some(elapsed) = self.scenario_load_elapsed() {
+            if elapsed >= Duration::from_millis(250) {
+                self.bg = BgOp::Idle;
+            }
+        }
         // Advance the spinner when work is in flight so the user sees motion.
         if self.bg.is_busy() {
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
@@ -403,6 +440,16 @@ impl App {
             }
             Screen::Picker => {
                 render_picker(frame, frame.area(), &mut self.picker);
+                if let BgOp::ScenarioLoad { started_at } = self.bg {
+                    let area = widget_spinner::top_right_rect(frame.area());
+                    widget_spinner::render(
+                        frame,
+                        area,
+                        "loading scenarios…",
+                        self.spinner_frame,
+                        started_at,
+                    );
+                }
             }
             Screen::Game => {
                 let (s, p, r, a, l) = game_layout(frame.area());
@@ -419,8 +466,31 @@ impl App {
                     .unwrap_or_default();
                 render_log(frame, l, &log);
                 self.render_status_line(frame);
-                if self.bg.is_busy() {
-                    self.render_spinner_overlay(frame);
+                // Delegate to the shared spinner widget for any busy state
+                // (LlmCall / Predict). Anchored at the bottom-right so it never
+                // covers the action menu.
+                match self.bg {
+                    BgOp::LlmCall { started_at } => {
+                        let area = widget_spinner::bottom_right_rect(frame.area());
+                        widget_spinner::render(
+                            frame,
+                            area,
+                            self.bg.label(),
+                            self.spinner_frame,
+                            started_at,
+                        );
+                    }
+                    BgOp::Predict { started_at } => {
+                        let area = widget_spinner::bottom_right_rect(frame.area());
+                        widget_spinner::render(
+                            frame,
+                            area,
+                            self.bg.label(),
+                            self.spinner_frame,
+                            started_at,
+                        );
+                    }
+                    _ => {}
                 }
             }
             Screen::GameOver => {
@@ -429,7 +499,7 @@ impl App {
         }
     }
 
-fn render_status_line(&self, frame: &mut ratatui::Frame) {
+    fn render_status_line(&self, frame: &mut ratatui::Frame) {
         use ratatui::style::{Color, Style};
         use ratatui::widgets::Paragraph;
         let area = ratatui::layout::Rect {
@@ -458,54 +528,6 @@ fn render_status_line(&self, frame: &mut ratatui::Frame) {
         };
         let p = Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 20)));
         frame.render_widget(p, area);
-    }
-    fn render_spinner_overlay(&self, frame: &mut ratatui::Frame) {
-        use ratatui::layout::Rect;
-        use ratatui::style::{Color, Modifier, Style};
-        use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-        // Anchor at the top-right of the action pane area (bottom-right of the
-        // overall frame) so the spinner never covers the action menu.
-        let frame_area = frame.area();
-        let w: u16 = 30;
-        let h: u16 = 3;
-        let area = Rect {
-            x: frame_area.width.saturating_sub(w + 1),
-            y: frame_area.height.saturating_sub(h + 3),
-            width: w.min(frame_area.width),
-            height: h.min(frame_area.height),
-        };
-        frame.render_widget(Clear, area);
-        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let glyph = frames[self.spinner_frame % frames.len()];
-        let elapsed_ms = match self.bg {
-            BgOp::LlmCall { started_at } | BgOp::Predict { started_at } => started_at.elapsed().as_millis(),
-            BgOp::Idle => 0,
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        let lines = vec![
-            Line::from(vec![
-                Span::styled(
-                    glyph,
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" {}", self.bg.label()),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(Span::styled(
-                format!("{:>4}.{:01}s", elapsed_ms / 1000, (elapsed_ms / 100) % 10),
-                Style::default().fg(Color::DarkGray),
-            )),
-        ];
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn render_game_over(&self, frame: &mut ratatui::Frame) {
@@ -539,6 +561,7 @@ fn render_status_line(&self, frame: &mut ratatui::Frame) {
                 Style::default().fg(Color::DarkGray),
             )),
         ];
+        let _ = Wrap { trim: false }; // satisfy unused-import lint on no_std toolchains
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 }

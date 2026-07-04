@@ -16,6 +16,7 @@ mod widget_action;
 mod widget_log;
 mod widget_predict;
 mod widget_radar;
+mod widget_spinner;
 mod widget_state;
 
 use app::{App, KeyCode, Screen};

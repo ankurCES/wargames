@@ -3,7 +3,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use wargames_core::Faction;
 
@@ -24,6 +24,9 @@ pub struct Picker {
     /// Cached filtered scenarios — invalidated by `next`/`prev`/`advance`.
     /// Stored as owned ids so we can return references without unsafe.
     filtered_cache: Vec<String>,
+    /// Render-time message shown when the filtered scenario list is empty
+    /// for the player's faction. `None` when the list is non-empty.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,24 +56,40 @@ impl Picker {
             scenarios,
             list_state: s,
             filtered_cache: Vec::new(),
+            error: None,
         };
         p.rebuild_cache();
         p
     }
 
-fn rebuild_cache(&mut self) {
+    fn rebuild_cache(&mut self) {
         let faction = self.countries.get(self.country_idx).map(|c| c.faction);
-        // A faction "plays" any scenario tagged for itself OR for any faction
-        // it is part of. NATO and the US are alliance partners in this game,
-        // so USA picks see NATO-tagged scenarios and vice versa. The PRC +
-        // DPRK are solo, and the Soviet Union is its own bloc.
+        // A faction "plays" any scenario tagged for itself OR for any
+        // great-power bloc in the same theater of operations. Without this
+        // widening, picking PRC or DPRK (which have no JSON-tagged scenarios
+        // yet) leaves the player with an empty list and no signal that the
+        // picker is hung.
+        //
+        // Visibility matrix:
+        //   Us     → Us | Nato | Soviet        (Cold-War great-power tag set)
+        //   Nato   → Nato | Us                 (alliance partner)
+        //   Soviet → Soviet | Nato | Us        (mirror of Us)
+        //   Prc    → Prc | Us | Nato | Soviet  (modern peer; sees everything)
+        //   Dprk   → Us | Nato                 (Korean theater; no Soviet)
         let accepted = |sf: Faction| -> bool {
             match faction {
-                Some(Faction::Us) => matches!(sf, Faction::Us | Faction::Nato),
+                Some(Faction::Us) => {
+                    matches!(sf, Faction::Us | Faction::Nato | Faction::Soviet)
+                }
                 Some(Faction::Nato) => matches!(sf, Faction::Nato | Faction::Us),
-                Some(Faction::Soviet) => matches!(sf, Faction::Soviet),
-                Some(Faction::Prc) => matches!(sf, Faction::Prc),
-                Some(Faction::Dprk) => matches!(sf, Faction::Dprk),
+                Some(Faction::Soviet) => {
+                    matches!(sf, Faction::Soviet | Faction::Nato | Faction::Us)
+                }
+                Some(Faction::Prc) => matches!(
+                    sf,
+                    Faction::Prc | Faction::Us | Faction::Nato | Faction::Soviet
+                ),
+                Some(Faction::Dprk) => matches!(sf, Faction::Us | Faction::Nato),
                 None => true,
             }
         };
@@ -80,6 +99,12 @@ fn rebuild_cache(&mut self) {
             .filter(|s| accepted(s.faction))
             .map(|s| s.id.clone())
             .collect();
+        // Surface an explicit empty-state message rather than a silent blank.
+        self.error = if self.filtered_cache.is_empty() {
+            Some("no scenarios match this faction — press Esc to go back".to_string())
+        } else {
+            None
+        };
         // Clamp scenario_idx.
         if self.scenario_idx >= self.filtered_cache.len() {
             self.scenario_idx = self.filtered_cache.len().saturating_sub(1);
@@ -164,7 +189,11 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
     frame.render_widget(Clear, area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(3),  // bordered title strip
+            Constraint::Min(1),    // list (or empty-state message)
+            Constraint::Length(1), // status bar
+        ])
         .split(area);
 
     let title = match picker.step {
@@ -181,6 +210,18 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
                 .add_modifier(Modifier::BOLD),
         ));
     frame.render_widget(block, chunks[0]);
+
+    // Empty-state branch — explicit, no silent blank list.
+    if let Some(msg) = picker.error.as_ref() {
+        let p = Paragraph::new(Line::from(Span::styled(
+            format!("  {msg}"),
+            Style::default().fg(Color::LightRed).add_modifier(Modifier::ITALIC),
+        )))
+        .wrap(Wrap { trim: false });
+        frame.render_widget(p, chunks[1]);
+        render_picker_status(frame, chunks[2], picker, "");
+        return;
+    }
 
     let items: Vec<ListItem> = match picker.step {
         PickerStep::Country => picker
@@ -230,6 +271,29 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
         )
         .highlight_symbol("> ");
     frame.render_stateful_widget(list, chunks[1], &mut picker.list_state);
+    render_picker_status(frame, chunks[2], picker, "");
+}
+
+/// Renders the 1-line status bar at the bottom of the picker pane. The
+/// caller passes an optional overlay string (e.g. "LOADING…") that takes
+/// visual precedence when the run loop is busy with scenario work.
+pub fn render_picker_status(frame: &mut Frame, area: Rect, picker: &Picker, overlay: &str) {
+    let body = if !overlay.is_empty() {
+        format!(" » {overlay}")
+    } else {
+        match picker.step {
+            PickerStep::Country => format!(
+                " pick a country (↑↓ select, Enter confirm) — {} available",
+                picker.countries.len()
+            ),
+            PickerStep::Scenario => format!(
+                " pick a scenario (↑↓ select, Enter confirm, Esc back) — {} filtered",
+                picker.filtered_scenarios().len()
+            ),
+        }
+    };
+    let p = Paragraph::new(body).style(Style::default().bg(Color::Rgb(20, 20, 20)));
+    frame.render_widget(p, area);
 }
 
 pub fn default_countries() -> Vec<Country> {
@@ -285,11 +349,11 @@ mod tests {
         );
         p.advance();
         let ids: Vec<&str> = p.filtered_scenarios().iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["a", "b"], "USA must see US+NATO scenarios");
+        assert_eq!(ids, vec!["a", "b", "c"], "USA must see US+NATO+Soviet scenarios");
     }
 
     #[test]
-    fn soviet_sees_only_soviet_scenarios() {
+    fn soviet_sees_us_nato_and_soviet_scenarios() {
         let mut p = Picker::new(
             vec![Country { faction: Faction::Soviet, hint: "".into() }],
             vec![
@@ -301,7 +365,11 @@ mod tests {
         );
         p.advance();
         let ids: Vec<&str> = p.filtered_scenarios().iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["c"], "Soviet must see only Soviet scenarios");
+        assert_eq!(
+            ids,
+            vec!["a", "b", "c"],
+            "Soviet must mirror Us: see US+NATO+Soviet scenarios"
+        );
     }
 
     #[test]
@@ -313,5 +381,53 @@ mod tests {
         p.advance();
         assert_eq!(p.scenario_idx, 0);
         assert_eq!(p.list_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn prc_sees_modern_great_power_set() {
+        let mut p = Picker::new(
+            vec![Country { faction: Faction::Prc, hint: "".into() }],
+            vec![
+                entry("a", Faction::Us),
+                entry("b", Faction::Nato),
+                entry("c", Faction::Soviet),
+                entry("d", Faction::Prc),
+            ],
+        );
+        p.advance();
+        let ids: Vec<&str> = p.filtered_scenarios().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a", "b", "c", "d"],
+            "PRC sees the full modern great-power set"
+        );
+    }
+
+    #[test]
+    fn dprk_sees_us_nato_only() {
+        let mut p = Picker::new(
+            vec![Country { faction: Faction::Dprk, hint: "".into() }],
+            vec![
+                entry("a", Faction::Us),
+                entry("b", Faction::Nato),
+                entry("c", Faction::Soviet),
+                entry("d", Faction::Prc),
+            ],
+        );
+        p.advance();
+        let ids: Vec<&str> = p.filtered_scenarios().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "DPRK only sees US+NATO scenarios");
+    }
+
+    #[test]
+    fn empty_state_sets_error_message() {
+        let mut p = Picker::new(
+            vec![Country { faction: Faction::Dprk, hint: "".into() }],
+            vec![entry("x", Faction::Prc), entry("y", Faction::Soviet)],
+        );
+        p.advance();
+        assert!(p.filtered_scenarios().is_empty());
+        assert!(p.error.is_some(), "must surface a render-time empty-state message");
+        assert!(p.advance() == false, "Enter on an empty list must not advance into the game");
     }
 }
