@@ -15,9 +15,34 @@ On launch:
 4. Gameplay loop in a herdr-style panned TUI: state, prediction, radar,
    action menu, and event log.
 
-## Build
+## Install (one command)
 
 ```
+curl -fsSL https://raw.githubusercontent.com/ankurCES/wargames/main/scripts/install.sh | bash
+```
+
+The installer:
+
+1. Checks for a Rust toolchain (`rustc >= 1.80`) and installs via `rustup` if
+   missing.
+2. Clones this repo into a scratch directory under `$TMPDIR`.
+3. Runs `cargo build --release` on `wargames-tui`.
+4. Installs the binary to `~/.cargo/bin/wargames`.
+5. Cleans up the scratch directory — nothing is left behind.
+6. Prints launch instructions.
+
+The scratch dir is preserved only on failure (for debugging); on success the
+`EXIT` trap removes it. There are no retries and no `cargo clean` — if the
+build fails the source is preserved for inspection, otherwise the install is
+one-shot.
+
+Override the install location with `WARGAMES_INSTALL_DIR=/some/path bash …`.
+
+## Build from source
+
+```
+git clone https://github.com/ankurCES/wargames.git
+cd wargames
 cargo build --release
 ./target/release/wargames
 ```
@@ -44,10 +69,23 @@ crates/
   wargames-core/   # pure rules: state, engine, triggers, predictions
   wargames-tui/    # the binary: splash, picker, paned UI
 scenarios/         # scenario JSON (verbatim from the JS impl)
+scripts/           # install.sh (curl|bash) + smoke.sh
 docs/              # plan + learnings
 old_data/          # the previous JS implementation, archived
-scripts/           # smoke test
 ```
+
+## Tests
+
+Targeted unit tests live alongside the code:
+
+```
+cargo test -p wargames-core
+```
+
+`scripts/smoke.sh` is the runtime regression net — it verifies the binary
+launches, the config path resolves to `~/.blumi/settings.json`, and the
+`scenarios/` directory loads. Workspace-wide runs happen periodically, not on
+every commit.
 
 ## License
 
