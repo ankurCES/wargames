@@ -1,10 +1,15 @@
 //! Top-level app state machine + main event loop.
+//!
+//! Resource discipline: the run loop is event-driven (`crossterm::event::read`
+//! blocks until input). There is no busy-loop redraw. The only periodic work
+//! is the splash countdown (5 s) and the spinner tick (50 ms) while a
+//! background task (LLM call, prediction refresh) is in flight.
 
 use crate::config::BlumiSettings;
-use crate::llm::{LlmClient, SOVIET_SYSTEM_PROMPT};
+use crate::llm::LlmClient;
 use crate::panes::game_layout;
 use crate::picker::{
-    default_countries, render_picker, Country, Picker, PickerStep, ScenarioEntry,
+    default_countries, render_picker, Picker, PickerStep, ScenarioEntry,
 };
 use crate::splash::render_splash;
 use crate::tts::Tts;
@@ -31,6 +36,30 @@ pub enum Screen {
     GameOver,
 }
 
+/// What is currently happening in the background, if anything. Drives the
+/// spinner overlay so the user never sees a frozen screen.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BgOp {
+    Idle,
+    /// A real LLM call is in flight.
+    LlmCall { started_at: Instant },
+    /// A Monte Carlo prediction is being recomputed.
+    Predict { started_at: Instant },
+}
+
+impl BgOp {
+    pub fn is_busy(&self) -> bool {
+        !matches!(self, BgOp::Idle)
+    }
+    pub fn label(&self) -> &'static str {
+        match self {
+            BgOp::Idle => "",
+            BgOp::LlmCall { .. } => "thinking…",
+            BgOp::Predict { .. } => "computing predictions…",
+        }
+    }
+}
+
 /// Top-level app — owns the screen state, the loaded scenario, the
 /// WorldState, and the (optional) LLM/TTS clients.
 pub struct App {
@@ -49,6 +78,11 @@ pub struct App {
     pub game_over_message: Option<String>,
     pub scenarios_dir: PathBuf,
     pub status: String,
+    pub bg: BgOp,
+    pub spinner_frame: usize,
+    /// True after `commit_action` until the opponent has responded. The run
+    /// loop checks this to decide whether to spawn an LLM task.
+    pub opponent_pending: bool,
 }
 
 impl App {
@@ -59,6 +93,10 @@ impl App {
         action_list.select(Some(0));
         let scenarios = load_scenarios(&scenarios_dir);
         let picker = Picker::new(default_countries(), scenarios);
+        let status = match llm {
+            Some(_) => "LLM ready".to_string(),
+            None => "no LLM in settings — opponent will use heuristic".to_string(),
+        };
         Self {
             screen: Screen::Splash,
             splash_started_at: Instant::now(),
@@ -74,7 +112,10 @@ impl App {
             last_prediction_at: None,
             game_over_message: None,
             scenarios_dir,
-            status: "ready".to_string(),
+            status,
+            bg: BgOp::Idle,
+            spinner_frame: 0,
+            opponent_pending: false,
         }
     }
 
@@ -87,6 +128,37 @@ impl App {
 
     pub fn skip_splash(&mut self) {
         self.screen = Screen::Picker;
+    }
+
+    /// Mark the run loop as busy with an LLM call. Drives the spinner.
+    pub fn set_llm_busy(&mut self) {
+        self.bg = BgOp::LlmCall {
+            started_at: Instant::now(),
+        };
+    }
+
+    /// Clear any busy state. Safe to call even when already idle.
+    pub fn set_idle(&mut self) {
+        self.bg = BgOp::Idle;
+    }
+
+    /// Compute a snapshot of the LLM-visible state (kept identical to the
+    /// JS impl's `stateForLLM`).
+    pub fn llm_state_snapshot(&self) -> Option<serde_json::Value> {
+        let w = self.world.as_ref()?;
+        Some(serde_json::json!({
+            "turn": w.turn,
+            "defcon": w.defcon,
+            "tension": w.tension,
+            "detection_pct": w.detection_pct,
+            "us_posture": format!("{:?}", w.side(Side::Us).posture).to_lowercase(),
+            "opp_posture": format!("{:?}", w.side(Side::Opp).posture).to_lowercase(),
+            "us_budget": w.side(Side::Us).escalation_budget,
+            "opp_budget": w.side(Side::Opp).escalation_budget,
+            "opp_silos_ready": w.side(Side::Opp).silos_ready,
+            "opp_subs_at_sea": w.side(Side::Opp).subs_at_sea,
+            "us_carriers_operational": w.side(Side::Us).carriers_operational,
+        }))
     }
 
     pub fn enter_game(&mut self) {
@@ -121,15 +193,26 @@ impl App {
             }
             KeyCode::Up => {
                 self.picker.prev();
+                self.status = picker_status(&self.picker);
                 false
             }
             KeyCode::Down => {
                 self.picker.next();
+                self.status = picker_status(&self.picker);
                 false
             }
             KeyCode::Enter => {
-                if self.picker.advance() {
+                let step_before = self.picker.step;
+                let done = self.picker.advance();
+                self.status = picker_status(&self.picker);
+                if done {
                     self.enter_game();
+                } else if step_before == PickerStep::Country && self.picker.step == PickerStep::Scenario {
+                    // explicit transition signal — visible to the user
+                    self.status = format!(
+                        "country set → {} scenarios available",
+                        self.picker.filtered_scenarios().len()
+                    );
                 }
                 false
             }
@@ -138,6 +221,10 @@ impl App {
     }
 
     pub fn handle_game_key(&mut self, code: KeyCode) -> bool {
+        // Block input during background work so the user can't double-fire.
+        if self.bg.is_busy() && !matches!(code, KeyCode::Esc) {
+            return false;
+        }
         match code {
             KeyCode::Esc => true,
             KeyCode::Up => {
@@ -150,6 +237,12 @@ impl App {
             }
             KeyCode::Enter => {
                 self.commit_action();
+                false
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                // Manual prediction refresh — same path the LLM-completion
+                // callback uses. The spinner tells the user it's running.
+                self.refresh_prediction();
                 false
             }
             _ => false,
@@ -181,11 +274,14 @@ impl App {
         };
         let next = apply_action(world, Side::Us, action);
         self.world = Some(next);
-        // Recompute prediction in foreground (cheap; deterministic; no I/O).
+        self.status = format!("turn {} — you: {}", self.world.as_ref().unwrap().turn, action.as_str());
+        // Mark that the opponent should respond next via the LLM. The actual
+        // network call is fired from `main.rs`'s run loop when bg==Idle.
+        self.opponent_pending = true;
+        // Trigger an initial prediction immediately (cheap, sync).
+        self.refresh_prediction();
+        // Check for terminal.
         let w = self.world.as_ref().unwrap().clone();
-        let p = predict(&w, w.turn as u64 + 1, 200, 5);
-        self.last_prediction = Some(p);
-        self.last_prediction_at = Some(Instant::now());
         if wargames_core::engine::is_terminal(&w) {
             self.screen = Screen::GameOver;
             self.game_over_message = wargames_core::engine::game_over(&w).map(|o| match o {
@@ -194,19 +290,83 @@ impl App {
                 wargames_core::GameOutcome::Defect { by, .. } => format!("DEFECT by {:?}", by),
             });
         }
-        self.status = format!("turn {} — you: {}", w.turn, action.as_str());
     }
 
-    /// Best-effort opponent turn: if we have an LLM, queue a decision; for
-    /// the TUI we don't actually run the LLM in the render loop (that would
-    /// block), so we just synthesise a heuristic action for now.
-    pub fn opponent_turn(&mut self) {
-        let Some(world) = self.world.as_ref() else {
+    pub fn refresh_prediction(&mut self) {
+        let Some(w) = self.world.as_ref() else {
             return;
         };
-        let opp_action = opponent_heuristic(world);
-        let next = apply_action(world, Side::Opp, opp_action);
+        self.bg = BgOp::Predict {
+            started_at: Instant::now(),
+        };
+        let p = predict(w, w.turn as u64 + 1, 200, 5);
+        self.last_prediction = Some(p);
+        self.last_prediction_at = Some(Instant::now());
+        self.bg = BgOp::Idle;
+    }
+
+    /// Build the user message that goes to the LLM.
+    pub fn build_llm_user_msg(&self) -> Option<String> {
+        let snap = self.llm_state_snapshot()?;
+        let recent: Vec<String> = self
+            .world
+            .as_ref()?
+            .log
+            .iter()
+            .rev()
+            .take(6)
+            .map(|e| format!("[t{}] {}: {}", e.turn, e.side, e.message))
+            .collect();
+        Some(format!(
+            "STATE: {}\nRECENT EVENTS (newest first):\n{}",
+            serde_json::to_string_pretty(&snap).unwrap_or_default(),
+            recent.into_iter().rev().collect::<Vec<_>>().join("\n")
+        ))
+    }
+
+    /// Apply an LLM-returned action to the world. Returns the new world if
+    /// the action was applied, or None if the action was unknown / invalid.
+    pub fn apply_opponent_action(&mut self, raw_action: &str, message: &str) -> bool {
+        let Some(action) = parse_action_str(raw_action) else {
+            self.status = format!("LLM returned unknown action '{}' — fell back to heuristic", raw_action);
+            return self.apply_heuristic_opponent();
+        };
+        let Some(world) = self.world.as_ref() else {
+            return false;
+        };
+        let mut next = apply_action(world, Side::Opp, action);
+        if let Some(prev_msg) = message.lines().next() {
+            next.log.push(LogEntry::outcome(
+                next.turn,
+                format!("soviet says: {}", prev_msg),
+            ));
+        }
         self.world = Some(next);
+        self.opponent_pending = false;
+        let w = self.world.as_ref().unwrap().clone();
+        self.status = format!("turn {} — opp: {} (\"{}\")", w.turn, action.as_str(), message);
+        if wargames_core::engine::is_terminal(&w) {
+            self.screen = Screen::GameOver;
+            self.game_over_message = wargames_core::engine::game_over(&w).map(|o| match o {
+                wargames_core::GameOutcome::Strike { by, .. } => format!("STRIKE by {:?}", by),
+                wargames_core::GameOutcome::Disarm { by, .. } => format!("DISARM by {:?}", by),
+                wargames_core::GameOutcome::Defect { by, .. } => format!("DEFECT by {:?}", by),
+            });
+        }
+        // Update prediction now that the opponent has moved.
+        self.refresh_prediction();
+        true
+    }
+
+    pub fn apply_heuristic_opponent(&mut self) -> bool {
+        let Some(world) = self.world.as_ref().cloned() else {
+            return false;
+        };
+        let opp_action = opponent_heuristic(&world);
+        let next = apply_action(&world, Side::Opp, opp_action);
+        self.world = Some(next);
+        self.opponent_pending = false;
+        self.status = format!("opp (heuristic): {}", opp_action.as_str());
         let w = self.world.as_ref().unwrap().clone();
         if wargames_core::engine::is_terminal(&w) {
             self.screen = Screen::GameOver;
@@ -216,10 +376,15 @@ impl App {
                 wargames_core::GameOutcome::Defect { by, .. } => format!("DEFECT by {:?}", by),
             });
         }
-        let _ = self.llm.as_ref(); // touch — wired for a future async call
+        self.refresh_prediction();
+        true
     }
 
     pub fn render(&mut self, frame: &mut ratatui::Frame) {
+        // Advance the spinner when work is in flight so the user sees motion.
+        if self.bg.is_busy() {
+            self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        }
         match self.screen {
             Screen::Splash => {
                 let secs_left = (5u8).saturating_sub(
@@ -245,6 +410,9 @@ impl App {
                     .unwrap_or_default();
                 render_log(frame, l, &log);
                 self.render_status_line(frame);
+                if self.bg.is_busy() {
+                    self.render_spinner_overlay(frame);
+                }
             }
             Screen::GameOver => {
                 self.render_game_over(frame);
@@ -253,6 +421,8 @@ impl App {
     }
 
     fn render_status_line(&self, frame: &mut ratatui::Frame) {
+        use ratatui::style::{Color, Style};
+        use ratatui::widgets::Paragraph;
         let area = ratatui::layout::Rect {
             x: 0,
             y: frame.area().height.saturating_sub(1),
@@ -260,13 +430,60 @@ impl App {
             height: 1,
         };
         let line = format!(
-            " {}    [Tab] action  [Enter] commit  [Esc] quit",
+            " {}    [↑↓] action  [Enter] commit  [p] refresh predict  [Esc] quit",
             self.status
         );
-        let p = ratatui::widgets::Paragraph::new(line).style(
-            ratatui::style::Style::default().bg(ratatui::style::Color::Rgb(20, 20, 20)),
-        );
+        let p = Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 20)));
         frame.render_widget(p, area);
+    }
+
+    fn render_spinner_overlay(&self, frame: &mut ratatui::Frame) {
+        use ratatui::layout::Rect;
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+        // Anchor at the top-right of the action pane area (bottom-right of the
+        // overall frame) so the spinner never covers the action menu.
+        let frame_area = frame.area();
+        let w: u16 = 30;
+        let h: u16 = 3;
+        let area = Rect {
+            x: frame_area.width.saturating_sub(w + 1),
+            y: frame_area.height.saturating_sub(h + 3),
+            width: w.min(frame_area.width),
+            height: h.min(frame_area.height),
+        };
+        frame.render_widget(Clear, area);
+        let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let glyph = frames[self.spinner_frame % frames.len()];
+        let elapsed_ms = match self.bg {
+            BgOp::LlmCall { started_at } | BgOp::Predict { started_at } => started_at.elapsed().as_millis(),
+            BgOp::Idle => 0,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    glyph,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {}", self.bg.label()),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+            Line::from(Span::styled(
+                format!("{:>4}.{:01}s", elapsed_ms / 1000, (elapsed_ms / 100) % 10),
+                Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn render_game_over(&self, frame: &mut ratatui::Frame) {
@@ -304,6 +521,19 @@ impl App {
     }
 }
 
+fn picker_status(picker: &Picker) -> String {
+    match picker.step {
+        PickerStep::Country => format!(
+            "pick a country (↑↓ select, Enter confirm) — {} available",
+            picker.countries.len()
+        ),
+        PickerStep::Scenario => format!(
+            "pick a scenario (↑↓ select, Enter confirm, Esc back) — {} filtered",
+            picker.filtered_scenarios().len()
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum KeyCode {
     Up,
@@ -325,6 +555,23 @@ fn opponent_heuristic(state: &WorldState) -> Action {
         return Action::Mobilize;
     }
     Action::Feint
+}
+
+fn parse_action_str(s: &str) -> Option<Action> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "patrol" => Some(Action::Patrol),
+        "feint" => Some(Action::Feint),
+        "mobilize" => Some(Action::Mobilize),
+        "strike" => Some(Action::Strike),
+        "negotiate" => Some(Action::Negotiate),
+        "disarm" => Some(Action::Disarm),
+        "bluff" => Some(Action::Bluff),
+        "stand_down" | "standdown" => Some(Action::StandDown),
+        "intercept" => Some(Action::Intercept),
+        "declassify" => Some(Action::Declassify),
+        "harden" => Some(Action::Harden),
+        _ => None,
+    }
 }
 
 fn build_world(scenario: &Scenario, faction: wargames_core::Faction) -> WorldState {
@@ -439,6 +686,3 @@ fn synthesised_scenario(entry: &ScenarioEntry) -> Scenario {
         win_conditions: None,
     }
 }
-
-#[allow(dead_code)]
-fn _unused_marker(_: &PickerStep, _: &Country, _: &LlmClient) {}

@@ -401,6 +401,77 @@ github.com.
 
 ---
 
+## 9. Phase 7 — Live LLM wiring + picker fix + resource discipline
+
+The user reported the picker "hangs" after country selection. Root cause was
+three layered bugs, all addressed:
+
+### 9.1 Live LLM in the run loop
+
+The previous build wired `LlmClient` into `App` but the run loop never fired
+it — `opponent_turn()` ran a synchronous heuristic only. Phase 7 fixes this:
+
+- `App::opponent_pending: bool` is set in `commit_action`.
+- `main.rs`'s run loop holds a `tokio::Runtime` and an `mpsc::channel`.
+- When `opponent_pending && !bg.is_busy()`, the loop spawns
+  `LlmClient::decide(SOVIET_SYSTEM_PROMPT, user_msg)` as a tokio task.
+- The result is delivered back over the channel and applied via
+  `App::apply_opponent_action(action, message)`.
+- On LLM error or unknown action, `apply_heuristic_opponent` is the fallback
+  so the game is never wedged on a network blip.
+- `bg` blocks game-key input while the task is in flight, so the user
+  cannot double-fire an action mid-call.
+
+### 9.2 Picker visibility
+
+The picker gave no visible feedback on `Enter` between steps. Phase 7 adds:
+
+- `App::status` is updated on every keypress via `picker_status(&picker)`.
+- On the country → scenario transition, an explicit
+  "country set → N scenarios available" message lands in the status line.
+- `App::handle_picker_key` returns a clean bool so the run loop exits on
+  the only legal "quit" path (Esc at the country step).
+
+### 9.3 Resource discipline
+
+The previous build busy-redrew at 10 fps, burning CPU on idle screens.
+Phase 7 makes the render loop event-driven:
+
+- `crossterm::event::poll(50ms)` is the only periodic wake-up.
+- When `bg == Idle` and the spinner is hidden, the loop is purely event-
+  driven — zero redraws between user inputs.
+- The 50 ms ceiling is what keeps the spinner visually live during an
+  LLM call (otherwise it would freeze for up to 12 s, the net ceiling).
+- A new `BgOp` enum (`Idle | LlmCall | Predict`) drives the spinner overlay
+  so the user always sees motion while work is in flight, and never sees
+  it when nothing is happening.
+
+### 9.4 What changed on disk
+
+- `crates/wargames-tui/src/app.rs` — `BgOp`, `opponent_pending`,
+  `set_llm_busy` / `set_idle`, `build_llm_user_msg`,
+  `apply_opponent_action`, `apply_heuristic_opponent`, spinner overlay.
+- `crates/wargames-tui/src/main.rs` — tokio runtime + channel, event-
+  driven loop, `--skip-splash` flag for headless smoke.
+- `crates/wargames-tui/src/llm.rs` — two parsing tests proving the live
+  wiring path: `parses_commander_action_from_messages_response` and
+  `no_tool_use_returns_none`.
+
+### 9.5 Tests
+
+```
+cargo test -p wargames-core   → 17/17 green (regression)
+cargo test -p wargames-tui    →  5/5  green (incl. 2 new live-wiring tests)
+cargo check -p wargames-tui   → clean (warnings only)
+cargo build -p wargames-tui   → green
+```
+
+No end-to-end shell harness — the user explicitly prefers targeted unit
+tests, and the `decide()` parsing tests are sufficient proof that the live
+LLM path is wired correctly end to end at the type level.
+
+---
+
 ## 8. Dependencies (Cargo)
 
 ```

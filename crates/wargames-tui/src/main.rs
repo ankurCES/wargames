@@ -20,8 +20,11 @@ mod widget_state;
 
 use app::{App, KeyCode, Screen};
 use clap::Parser;
+use llm::SOVIET_SYSTEM_PROMPT;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Duration;
+use tokio::runtime::Runtime;
 
 #[derive(Parser, Debug)]
 #[command(name = "wargames", version, about = "WOPR-style war game TUI")]
@@ -32,6 +35,10 @@ struct Cli {
     /// Print the resolved settings path and exit.
     #[arg(long)]
     print_config_path: bool,
+    /// Disable the splash countdown and start directly at the picker.
+    /// Mostly useful for the e2e smoke test.
+    #[arg(long)]
+    skip_splash: bool,
 }
 
 fn main() -> std::process::ExitCode {
@@ -63,32 +70,82 @@ fn main() -> std::process::ExitCode {
     };
 
     let mut app = App::new(settings, cli.scenarios_dir);
+    if cli.skip_splash {
+        app.skip_splash();
+    }
 
     let mut terminal = ratatui::init();
-
     let res = run_loop(&mut terminal, &mut app);
-
     ratatui::restore();
     res
+}
+
+/// Result returned by the LLM task over the channel.
+enum LlmResult {
+    Ok { action: String, message: String },
+    Err(String),
+}
+
+fn short_err(s: &str) -> String {
+    if s.len() > 80 {
+        format!("{}…", &s[..80])
+    } else {
+        s.to_string()
+    }
 }
 
 fn run_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> std::process::ExitCode {
-    let tick = Duration::from_millis(100);
-    loop {
-        terminal
-            .draw(|f| app.render(f))
-            .expect("terminal draw");
+    // Tokio runtime so the LLM task runs on a worker thread; the UI stays
+    // responsive on the main thread. Event-driven render — we redraw once
+    // per loop iteration (top), then block on input up to `tick` so the
+    // spinner updates while a task is in flight.
+    let rt = Runtime::new().expect("tokio runtime");
+    let (tx, rx) = mpsc::channel::<LlmResult>();
+    let tick = Duration::from_millis(50);
 
-        // Splash countdown.
-        if app.screen == Screen::Splash {
-            app.tick_splash();
-            std::thread::sleep(tick);
-            continue;
+    loop {
+        terminal.draw(|f| app.render(f)).expect("terminal draw");
+
+        // 1) Drain any completed LLM result (non-blocking).
+        if let Ok(result) = rx.try_recv() {
+            app.set_idle();
+            match result {
+                LlmResult::Ok { action, message } => {
+                    app.apply_opponent_action(&action, &message);
+                }
+                LlmResult::Err(e) => {
+                    app.status = format!("LLM error: {} — falling back to heuristic", short_err(&e));
+                    let _ = app.apply_heuristic_opponent();
+                }
+            }
+            app.opponent_pending = false;
         }
 
+        // 2) Spawn LLM task if pending and not already in flight.
+        if app.opponent_pending && !app.bg.is_busy() {
+            if let (Some(llm), Some(msg)) = (app.llm.clone(), app.build_llm_user_msg()) {
+                app.set_llm_busy();
+                let tx = tx.clone();
+                rt.spawn(async move {
+                    let res = match llm.decide(SOVIET_SYSTEM_PROMPT, &msg).await {
+                        Some(parsed) => LlmResult::Ok {
+                            action: parsed.action,
+                            message: parsed.message,
+                        },
+                        None => LlmResult::Err("LLM returned no commander action".into()),
+                    };
+                    let _ = tx.send(res);
+                });
+            } else {
+                // No LLM configured — use the heuristic immediately.
+                let _ = app.apply_heuristic_opponent();
+            }
+        }
+
+        // 3) Block on input (with a small ceiling so the spinner updates).
         if event::poll(tick).unwrap_or(false) {
             if let Some(code) = event::read_key() {
                 if app.screen == Screen::GameOver {
@@ -97,20 +154,21 @@ fn run_loop(
                 let quit = match app.screen {
                     Screen::Picker => app.handle_picker_key(code),
                     Screen::Game => app.handle_game_key(code),
-                    Screen::Splash | Screen::GameOver => false,
+                    Screen::Splash => {
+                        app.skip_splash();
+                        false
+                    }
+                    Screen::GameOver => false,
                 };
                 if quit {
                     return std::process::ExitCode::SUCCESS;
                 }
-                // After committing a player action, run opponent turn.
-                if app.screen == Screen::Game && matches!(code, KeyCode::Enter) {
-                    app.opponent_turn();
-                }
-                // Splash skip on any key.
-                if app.screen == Screen::Splash {
-                    app.skip_splash();
-                }
             }
+        }
+
+        // 4) Splash countdown.
+        if app.screen == Screen::Splash {
+            app.tick_splash();
         }
     }
 }

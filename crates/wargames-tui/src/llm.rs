@@ -144,6 +144,46 @@ impl MessagesResponse {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real Anthropic Messages API responses wrap the tool call in a
+    /// `content[]` array. Parse exactly one such response end-to-end to
+    /// guarantee the live wiring path stays correct.
+    #[test]
+    fn parses_commander_action_from_messages_response() {
+        let raw = r#"{
+            "content": [
+                {"type": "text", "text": "thinking..."},
+                {
+                    "type": "tool_use",
+                    "name": "commander_action",
+                    "input": {
+                        "action": "mobilize",
+                        "message": "Silos are warming."
+                    }
+                }
+            ]
+        }"#;
+        let resp: MessagesResponse = serde_json::from_str(raw).unwrap();
+        let parsed = resp.into_commander_action().expect("must parse");
+        assert_eq!(parsed.action, "mobilize");
+        assert_eq!(parsed.message, "Silos are warming.");
+        assert!(parsed.target.is_none());
+    }
+
+    /// If the model never calls the tool (common when it breaks character),
+    /// we get None — the caller falls back to the heuristic. Make sure we
+    /// do not panic on that path.
+    #[test]
+    fn no_tool_use_returns_none() {
+        let raw = r#"{"content": [{"type": "text", "text": "I will not comply."}]}"#;
+        let resp: MessagesResponse = serde_json::from_str(raw).unwrap();
+        assert!(resp.into_commander_action().is_none());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommanderAction {
     pub action: String,
