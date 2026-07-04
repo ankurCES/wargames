@@ -472,6 +472,66 @@ LLM path is wired correctly end to end at the type level.
 
 ---
 
+## 10. Phase 8 — Picker scenario bug + SSE streaming LLM
+
+Two user-reported issues. Both fixed; both proven by targeted unit tests.
+
+### 10.1 Picker scenario blank
+
+After choosing USA in the picker, the scenario list rendered empty even
+though `ScenarioBank` shipped NATO-tagged scenarios meant to be visible to
+both sides of the Cold War. Root cause: `PickerState::filtered_scenarios`
+keyed the visible set on an exact `tags.contains(&side)` match, so USA's
+`["US"]` filter dropped every NATO scenario.
+
+Fix in `crates/wargames-tui/src/picker.rs`: the filter now treats `nato`
+as visible to any USA-player side and `warsaw` as visible to any SOVIET
+side, so the player always sees the scenarios their bloc actually fields.
+Three new focused tests cover this:
+
+- `usa_sees_us_and_nato_scenarios`
+- `soviet_sees_only_soviet_scenarios`
+- `advance_resets_scenario_index`
+
+### 10.2 SSE streaming LLM
+
+Phase 7 fired `LlmClient::decide` as a single blocking call, so the TUI
+showed a spinner for up to 12 s with no visible text. Phase 8 streams
+tokens as they arrive so the status line fills in live:
+
+- New `decide_stream` method on `LlmClient` returns an
+  `impl Stream<Item = StreamToken>` rather than a `Result<CommanderAction>`.
+- `StreamToken` is `Delta(String) | Final(CommanderAction) | Error(...)`.
+- New `SseEvent` / `Delta` types parse RFC 8896 wire frames: a single
+  record is delimited by `\n\n` (LF) or `\r\n\r\n` (CRLF); partial frames
+  are buffered until the boundary arrives.
+- `find_sse_record` is the boundary locator — returns the byte offset just
+  past the delimiter so the run loop can slice the next record cleanly.
+- `reqwest`'s `"stream"` feature is enabled; `futures-util` is a workspace
+  dependency.
+- The TUI run loop drains the stream, pushes `Delta`s into
+  `App::streaming_message`, and renders them via `render_status_line`
+  so the user sees the commander narrating in real time.
+- On stream end, `Final(action)` lands and is applied through the same
+  `apply_opponent_action` path that phase 7 wired, so a streaming failure
+  still falls back to the heuristic opponent.
+
+### 10.3 Tests
+
+```
+cargo test -p wargames-tui    →  9/9 green (incl. 3 picker + 3 SSE)
+cargo test -p wargames-core   → 17/17 green (regression)
+cargo build -p wargames-tui   → green (0 errors, 16 warnings)
+```
+
+New tests in `crates/wargames-tui/src/llm.rs`:
+
+- `sse_record_finder_handles_lf_and_crlf`
+- `sse_delta_assembles_commander_action`
+- `no_tool_use_returns_none`
+
+---
+
 ## 8. Dependencies (Cargo)
 
 ```

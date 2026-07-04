@@ -58,15 +58,26 @@ impl Picker {
         p
     }
 
-    fn rebuild_cache(&mut self) {
+fn rebuild_cache(&mut self) {
         let faction = self.countries.get(self.country_idx).map(|c| c.faction);
+        // A faction "plays" any scenario tagged for itself OR for any faction
+        // it is part of. NATO and the US are alliance partners in this game,
+        // so USA picks see NATO-tagged scenarios and vice versa. The PRC +
+        // DPRK are solo, and the Soviet Union is its own bloc.
+        let accepted = |sf: Faction| -> bool {
+            match faction {
+                Some(Faction::Us) => matches!(sf, Faction::Us | Faction::Nato),
+                Some(Faction::Nato) => matches!(sf, Faction::Nato | Faction::Us),
+                Some(Faction::Soviet) => matches!(sf, Faction::Soviet),
+                Some(Faction::Prc) => matches!(sf, Faction::Prc),
+                Some(Faction::Dprk) => matches!(sf, Faction::Dprk),
+                None => true,
+            }
+        };
         self.filtered_cache = self
             .scenarios
             .iter()
-            .filter(|s| match faction {
-                Some(f) => s.faction == f,
-                None => true,
-            })
+            .filter(|s| accepted(s.faction))
             .map(|s| s.id.clone())
             .collect();
         // Clamp scenario_idx.
@@ -74,7 +85,6 @@ impl Picker {
             self.scenario_idx = self.filtered_cache.len().saturating_sub(1);
         }
     }
-
     pub fn next(&mut self) {
         let len = match self.step {
             PickerStep::Country => self.countries.len(),
@@ -245,4 +255,63 @@ pub fn default_countries() -> Vec<Country> {
             hint: "Limited arsenal, high noise".to_string(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wargames_core::Faction;
+
+    fn entry(id: &str, faction: Faction) -> ScenarioEntry {
+        ScenarioEntry {
+            id: id.into(),
+            title: id.into(),
+            defcon: 3,
+            theater: "test".into(),
+            faction,
+        }
+    }
+
+    #[test]
+    fn usa_sees_us_and_nato_scenarios() {
+        let mut p = Picker::new(
+            vec![Country { faction: Faction::Us, hint: "".into() }],
+            vec![
+                entry("a", Faction::Us),
+                entry("b", Faction::Nato),
+                entry("c", Faction::Soviet),
+                entry("d", Faction::Prc),
+            ],
+        );
+        p.advance();
+        let ids: Vec<&str> = p.filtered_scenarios().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "USA must see US+NATO scenarios");
+    }
+
+    #[test]
+    fn soviet_sees_only_soviet_scenarios() {
+        let mut p = Picker::new(
+            vec![Country { faction: Faction::Soviet, hint: "".into() }],
+            vec![
+                entry("a", Faction::Us),
+                entry("b", Faction::Nato),
+                entry("c", Faction::Soviet),
+                entry("d", Faction::Prc),
+            ],
+        );
+        p.advance();
+        let ids: Vec<&str> = p.filtered_scenarios().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["c"], "Soviet must see only Soviet scenarios");
+    }
+
+    #[test]
+    fn advance_resets_scenario_index() {
+        let mut p = Picker::new(
+            vec![Country { faction: Faction::Us, hint: "".into() }],
+            vec![entry("a", Faction::Us), entry("b", Faction::Nato)],
+        );
+        p.advance();
+        assert_eq!(p.scenario_idx, 0);
+        assert_eq!(p.list_state.selected(), Some(0));
+    }
 }

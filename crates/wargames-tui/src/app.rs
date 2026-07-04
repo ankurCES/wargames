@@ -83,6 +83,13 @@ pub struct App {
     /// True after `commit_action` until the opponent has responded. The run
     /// loop checks this to decide whether to spawn an LLM task.
     pub opponent_pending: bool,
+    /// Live-streamed soviet response text. Appended-to by the SSE task via
+    /// a per-turn channel, read by the run loop on every tick. Cleared at
+    /// the start of every opponent turn.
+    pub streaming_message: String,
+    /// Final action assembled from the streaming tool-use input deltas.
+    /// `None` until the SSE stream ends.
+    pub streaming_action: Option<String>,
 }
 
 impl App {
@@ -116,6 +123,8 @@ impl App {
             bg: BgOp::Idle,
             spinner_frame: 0,
             opponent_pending: false,
+            streaming_message: String::new(),
+            streaming_action: None,
         }
     }
 
@@ -420,7 +429,7 @@ impl App {
         }
     }
 
-    fn render_status_line(&self, frame: &mut ratatui::Frame) {
+fn render_status_line(&self, frame: &mut ratatui::Frame) {
         use ratatui::style::{Color, Style};
         use ratatui::widgets::Paragraph;
         let area = ratatui::layout::Rect {
@@ -429,14 +438,27 @@ impl App {
             width: frame.area().width,
             height: 1,
         };
-        let line = format!(
-            " {}    [↑↓] action  [Enter] commit  [p] refresh predict  [Esc] quit",
-            self.status
-        );
+        // While the LLM is streaming, show the partial message in the
+        // status line so the user sees tokens as they arrive. Once the
+        // task completes, fall back to the regular status text.
+        let line = if self.bg.is_busy() && !self.streaming_message.is_empty() {
+            // Truncate to fit on one terminal row.
+            let max = area.width.saturating_sub(2) as usize;
+            let msg = if self.streaming_message.len() > max {
+                &self.streaming_message[self.streaming_message.len() - max..]
+            } else {
+                &self.streaming_message
+            };
+            format!(" » soviet: {}", msg)
+        } else {
+            format!(
+                " {}    [↑↓] action  [Enter] commit  [p] refresh predict  [Esc] quit",
+                self.status
+            )
+        };
         let p = Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 20)));
         frame.render_widget(p, area);
     }
-
     fn render_spinner_overlay(&self, frame: &mut ratatui::Frame) {
         use ratatui::layout::Rect;
         use ratatui::style::{Color, Modifier, Style};
