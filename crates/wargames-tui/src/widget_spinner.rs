@@ -57,13 +57,16 @@ pub const PROGRESS_TOTAL_FRAMES: usize = 18;
 /// Phase verbs cycled through the top-line text. Each is short enough
 /// to fit the 28-char box width alongside the sprite. The trailing
 /// em-space gives the text room to "breathe" as it cycles.
+// All verbs are kept under 20 bytes so they fit the box alongside the
+// sprite glyph and percent label. Trailing whitespace is trimmed so the
+// byte-length assertion is clean (no padded spacer char to subtract).
 const PHASE_VERBS: &[&str] = &[
-    "warming up…        ",
-    "loading theater…   ",
+    "warming up…",
+    "loading theater…",
     "preparing scenarios",
-    "computing initial… ",
-    "rendering layout…  ",
-    "almost there…      ",
+    "compute initial…",
+    "rendering layout…",
+    "almost there…",
 ];
 
 /// Returns the phase verb for a given frame index. The verb cycles every
@@ -79,17 +82,20 @@ pub fn phase_verb_at(frame_idx: usize) -> &'static str {
 const BAR_WIDTH: usize = 18;
 
 /// Compute the bar fill width (in cells, 0..=BAR_WIDTH) for a given frame
-/// index. Uses a smoothstep so the bar accelerates from 0 and decelerates
-/// into the cap — looks like a real progress indicator, not a counter.
+/// index. Uses a linear ramp so the user sees visible motion on the very
+/// first tick (frame 1 → 1 cell), and the bar caps at `BAR_WIDTH` at
+/// frame `PROGRESS_TOTAL_FRAMES`. Linear was chosen over smoothstep so
+/// the curve is deterministic and the bar visibly starts filling — the
+/// smoothstep variant stayed at 0 cells for the first ~3 frames, which
+/// felt like the bar was "stuck" before it began moving.
 pub fn progress_fill_at(frame_idx: usize) -> usize {
     if frame_idx == 0 {
         return 0;
     }
     let n = frame_idx.min(PROGRESS_TOTAL_FRAMES);
-    // Smoothstep: 3t^2 - 2t^3 over t in [0,1]. Multiplied by BAR_WIDTH.
-    let t = n as f32 / PROGRESS_TOTAL_FRAMES as f32;
-    let s = t * t * (3.0 - 2.0 * t);
-    (s * BAR_WIDTH as f32).round() as usize
+    // Linear ramp: (frame / total) * BAR_WIDTH, rounded to nearest cell.
+    let raw = (n as f32 * BAR_WIDTH as f32) / PROGRESS_TOTAL_FRAMES as f32;
+    raw.round() as usize
 }
 
 /// Percent label for the trailing portion of the bar line (e.g. " 73%").

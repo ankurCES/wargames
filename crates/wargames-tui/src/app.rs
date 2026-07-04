@@ -102,6 +102,14 @@ impl App {
         let tts = Tts::from_settings(&settings);
         let mut action_list = ListState::default();
         action_list.select(Some(0));
+        // Resolve relative `scenarios_dir` against the crate's manifest
+        // directory so the picker always finds the bundled scenarios,
+        // regardless of the process CWD. Without this, `cargo test`
+        // (whose CWD is the crate root) and any user who runs `wargames`
+        // from outside the repo both end up with an empty scenario list
+        // and a picker that silently hangs on the Scenario step — the
+        // exact (a) bug the user has been reporting.
+        let scenarios_dir = resolve_scenarios_dir(scenarios_dir);
         let scenarios = load_scenarios(&scenarios_dir);
         let picker = Picker::new(default_countries(), scenarios);
         let status = match llm {
@@ -246,7 +254,25 @@ impl App {
                 }
                 let done = self.picker.advance();
                 self.status = picker_status(&self.picker);
+                // Two paths into `enter_game`:
+                //   1. Picker's `advance()` reports the picker is *done*
+                //      AND no background op is in flight — both Country
+                //      and Scenario were already completed, the spinner
+                //      has auto-cleared (or never started).
+                //   2. User pressed Enter on the Scenario step with a
+                //      scenario selected — `advance()` returns `done=true`
+                //      here. The Country→Scenario spinner already had its
+                //      ~900 ms fill window during the previous tick; this
+                //      second Enter is the user-confirmed Scenario pick,
+                //      so enter the game immediately even if a stale
+                //      `ScenarioLoad` is still in `self.bg` (the render
+                //      loop will clear it). Without this branch, the
+                //      picker would be stuck on the Scenario step after
+                //      the user confirms their selection.
                 if done && !self.bg.is_busy() {
+                    self.enter_game();
+                } else if done && step_before == PickerStep::Scenario {
+                    self.bg = BgOp::Idle;
                     self.enter_game();
                 } else if step_before == PickerStep::Country
                     && self.picker.step == PickerStep::Scenario
@@ -429,9 +455,19 @@ impl App {
         // per tick — long enough that the user actually sees the progress
         // bar fill (PROGRESS_TOTAL_FRAMES in widget_spinner), short enough
         // to feel snappy and never block the picker.
+        //
+        // The deferred `enter_game` from the picker's Country→Scenario
+        // Enter path lives here: while ScenarioLoad is active, the user
+        // sees the bar fill; on auto-clear we flip into Game so the
+        // picker doesn't get stuck on the Scenario step after Enter.
         if let Some(elapsed) = self.scenario_load_elapsed() {
             if elapsed >= Duration::from_millis(900) {
                 self.bg = BgOp::Idle;
+                if matches!(self.screen, Screen::Picker)
+                    && matches!(self.picker.step, PickerStep::Scenario)
+                {
+                    self.enter_game();
+                }
             }
         }
         // Advance the spinner when work is in flight so the user sees motion.
@@ -663,6 +699,34 @@ fn build_world(scenario: &Scenario, faction: wargames_core::Faction) -> WorldSta
 fn parse_defcon(s: &str) -> Option<u8> {
     // "DEFCON_3" → 3
     s.strip_prefix("DEFCON_")?.parse().ok()
+}
+
+/// Resolve a possibly-relative `scenarios_dir` to a directory that exists.
+/// Order of preference:
+///   1. If the path is absolute, use it as-is.
+///   2. If the path resolves relative to the current working directory and
+///      that directory actually exists, use it.
+///   3. Otherwise resolve relative to the crate manifest directory — the
+///      path from `scenarios/` to `crates/wargames-tui/` is `../../scenarios`.
+///      This makes the bundled scenarios findable from any CWD, so the
+///      picker never silently presents an empty scenario list (the (a)
+///      bug the user reported: "TUI has a problem after country is
+///      selected" → scenarios never load → picker hangs).
+fn resolve_scenarios_dir(p: PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        return p;
+    }
+    if p.is_dir() {
+        return p;
+    }
+    let from_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(&p);
+    if from_manifest.is_dir() {
+        return from_manifest;
+    }
+    p
 }
 
 fn load_scenarios(dir: &std::path::Path) -> Vec<ScenarioEntry> {
@@ -928,5 +992,126 @@ mod playable_flow_tests {
             "spinner must trigger on country→scenario step"
         );
         assert_eq!(app.picker.step, PickerStep::Scenario);
+    }
+
+    /// RENDER-LEVEL proof of (a) — the phantom empty-state on the Country
+    /// step. Unit tests assert `picker.error.is_none()`; this test drives
+    /// `App::render` through a real `Terminal<TestBackend>` and asserts
+    /// the rendered buffer does NOT contain "no scenarios match this
+    /// faction" on the Country step, and DOES contain the country
+    /// picker title and a country name. This is the proof at the level
+    /// the user sees in their terminal.
+    #[test]
+    fn fresh_picker_render_does_not_show_phantom_empty_state() {
+        use ratatui::Terminal;
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let mut app = fresh_app();
+        assert_eq!(app.screen, Screen::Picker);
+        assert_eq!(app.picker.step, PickerStep::Country);
+
+        terminal.draw(|f| app.render(f)).expect("render succeeds");
+        // Use the test backend's internal buffer (the one `draw` wrote to),
+        // NOT `terminal.current_buffer_mut()` which returns a fresh empty
+        // buffer in ratatui 0.30. The buffer contains multi-byte box-drawing
+        // glyphs (e.g. '─' is 3 bytes) so we must slice by chars, not bytes,
+        // to avoid panicking on a non-char-boundary.
+        let backend = terminal.backend();
+        let buf = backend.buffer().clone();
+        let rendered: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+
+        assert!(
+            rendered.contains("PICK A COUNTRY"),
+            "rendered buffer must show the country picker title",
+        );
+        // At least one country from `default_countries()` must be visible.
+        // default_countries() starts with US, then Soviet, NATO, PRC, DPRK.
+        let any_country = rendered.contains("USA")
+            || rendered.contains("Soviet")
+            || rendered.contains("NATO")
+            || rendered.contains("PRC")
+            || rendered.contains("DPRK")
+            || rendered.contains("United States");
+        assert!(
+            any_country,
+            "rendered buffer must show at least one country from default_countries()"
+        );
+        // THE bug the user reported: the phantom empty-state on the
+        // Country step, before any country was picked.
+        assert!(
+            !rendered.contains("no scenarios match this faction"),
+            "rendered buffer must NOT show the phantom empty-state on the Country step; \
+             got tail: {:?}",
+            &rendered[rendered.len().saturating_sub(400)..]
+        );
+    }
+
+    /// RENDER-LEVEL proof of (b) — the loading affordance must actually
+    /// paint in the frame during the Country→Scenario transition. Drives
+    /// `App::render` while `BgOp::ScenarioLoad` is active and asserts
+    /// the spinner widget's animated text appears in the rendered
+    /// buffer (one of the 6 phase verbs).
+    #[test]
+    fn picker_enter_during_loading_paints_spinner_in_rendered_frame() {
+        use ratatui::Terminal;
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter);
+        // After Enter on the Country step, the picker is on Scenario and
+        // bg == ScenarioLoad. Render that frame and assert the spinner
+        // widget paints *something* the user can see — one of the phase
+        // verbs or the LOADING label.
+        assert_eq!(app.picker.step, PickerStep::Scenario);
+        assert!(matches!(app.bg, BgOp::ScenarioLoad { .. }));
+
+        // Advance the spinner frame a few ticks so the bar has progressed.
+        for _ in 0..3 {
+            app.spinner_frame = app.spinner_frame.wrapping_add(1);
+            terminal.draw(|f| app.render(f)).expect("render succeeds");
+        }
+
+        let backend = terminal.backend();
+        let buf = backend.buffer().clone();
+        let rendered: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+
+        // (b) check: at least one of the spinner affordances appears in
+        // the rendered buffer. The widget renders either the "loading
+        // scenarios…" label (bg.label()) or one of the 6 phase verbs,
+        // or the LOADING shimmer row.
+        let has_loading = rendered.contains("loading")
+            || rendered.contains("warming")
+            || rendered.contains("preparing")
+            || rendered.contains("computing")
+            || rendered.contains("rendering")
+            || rendered.contains("almost")
+            || rendered.contains("LOADING");
+        assert!(
+            has_loading,
+            "rendered buffer must show a loading affordance (phase verb / LOADING label) \
+             during the ScenarioLoad transition",
+        );
     }
 }

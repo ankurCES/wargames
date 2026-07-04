@@ -30,11 +30,12 @@ impl Side {
 /// Strategic posture. Maps to escalation intent. The numeric ordering is
 /// deliberately monotonic — higher = more aggressive — so rules can compare
 /// without enumerating variants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Posture {
     Negotiating,
     Deescalating,
+    #[default]
     Routine,
     Aggressive,
     Hardened,
@@ -120,11 +121,38 @@ impl Faction {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SideState {
+    // `posture` defaults to `Posture::Routine` when missing so legacy
+    // scenario JSON files (authored before `posture` was added) still
+    // parse. Without this, every bundled `scenarios/*.json` fails
+    // `serde_json::from_str` with `missing field 'posture'`, the
+    // picker silently ends up with an empty scenario list, and the
+    // user sees "the TUI has a problem after country is selected" —
+    // the exact (a) bug. The struct-level `#[serde(default)]` makes
+    // EVERY missing field use the `Default` impl below, so legacy
+    // scenarios with completely-missing `SideState` blocks still load
+    // and the player at least sees the scenario list.
+    #[serde(default)]
     pub posture: Posture,
+    #[serde(default)]
     pub escalation_budget: i32,
+    #[serde(default)]
     pub silos_ready: u32,
+    #[serde(default)]
     pub carriers_operational: u32,
+    #[serde(default)]
     pub subs_at_sea: u32,
+}
+
+impl Default for SideState {
+    fn default() -> Self {
+        Self {
+            posture: Posture::Routine,
+            escalation_budget: 0,
+            silos_ready: 0,
+            carriers_operational: 0,
+            subs_at_sea: 0,
+        }
+    }
 }
 
 impl SideState {
