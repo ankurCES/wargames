@@ -1,0 +1,40 @@
+{
+    "id": "eastern_med_2024",
+    "title": "Eastern Mediterranean / Aegean, 2024",
+    "briefing": "DEFCON 4. Greek and Turkish air assets have been scrambling daily over the Aegean. A Turkish research vessel escorted by the TCG Yavuz is operating inside the Greek EEZ near Cyprus. Russia has dispatched a submarine through the Bosphorus.",
+    "initial_state": "DEFCON_4",
+    "initial_detection_pct": 45,
+    "data_sources": ["open_sky", "osint_news", "satellite_track", "ship_tracks"],
+    "faction": "nato",
+    "era": "modern",
+    "gdelt_query": "Aegean OR Eastern Mediterranean OR Turkey Greece OR Cyprus EEZ OR TCG OR Bosphorus",
+    "open_sky_bbox": [32, 38, 25, 36],
+    "ship_tracks": [
+        { "name": "TCG Yavuz",        "hull": "frigate",    "kind": "soviet",  "speed_kn": 26 },
+        { "name": "TCG Kinaliada",    "hull": "corvette",   "kind": "soviet",  "speed_kn": 28 },
+        { "name": "HS Kimi",          "hull": "frigate",    "kind": "nato",    "speed_kn": 26 },
+        { "name": "HS Hydra",         "hull": "frigate",    "kind": "nato",    "speed_kn": 26 },
+        { "name": "B-871 Krasnodar",  "hull": "submarine",  "kind": "soviet",  "speed_kn": 18 },
+        { "name": "USS Porter",       "hull": "destroyer",  "kind": "us",      "speed_kn": 30 }
+    ],
+    "us": {
+        "carriersOperational": 0,
+        "silosReady": 100,
+        "escalation_budget": 40
+    },
+    "soviet": {
+        "subsAtSea": 3,
+        "silosReady": 100,
+        "escalation_budget": 50
+    },
+    "map": {
+        "center": [35, 30],
+        "zoom": 5
+    },
+    "opening_message": "WOPR online. Theater: Eastern Mediterranean / Aegean. Awaiting strategic command.",
+    "win_conditions": {
+        "disarm": "Deconflict the Aegean without a kinetic exchange.",
+        "defeat_strike": "Either side strikes first.",
+        "mutual_assured_destruction": "A NATO and a Russian-flagged asset are lost in the same window."
+    }
+}

@@ -1,0 +1,29 @@
+{
+    "id": "north_atlantic_1983",
+    "title": "North Atlantic, 1983",
+    "faction": "nato",
+    "era": "cold_war",
+    "briefing": "DEFCON 3. A Soviet submarine flotilla is moving through the GIUK gap. Two US carrier groups are on station. The first shots could trigger mutual annihilation. Your objective: prevent it.",
+    "initial_state": "DEFCON_3",
+    "initial_detection_pct": 45,
+    "us": {
+        "carriersOperational": 2,
+        "silosReady": 100,
+        "escalation_budget": 60
+    },
+    "soviet": {
+        "subsAtSea": 8,
+        "silosReady": 100,
+        "escalation_budget": 55
+    },
+    "map": {
+        "center": [55, -30],
+        "zoom": 3
+    },
+    "opening_message": "WOPR online. Awaiting strategic command.",
+    "win_conditions": {
+        "disarm": "End the game with DEFCON <= 2 and both sides' posture = 'deescalating'.",
+        "defeat_strike": "Either side launches first.",
+        "mutual_assured_destruction": "Both sides launch within 2 turns of each other."
+    }
+}

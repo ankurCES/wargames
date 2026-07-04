@@ -1,0 +1,40 @@
+{
+    "id": "black_sea_2024",
+    "title": "Black Sea, 2024",
+    "briefing": "DEFCON 4. Sevastopol-based Russian naval assets are moving. NATO air policing runs out of Romania and Bulgaria track the activity. A mishap over the Bosporus would draw every capital in.",
+    "initial_state": "DEFCON_4",
+    "initial_detection_pct": 40,
+    "data_sources": ["open_sky", "osint_news"],
+    "faction": "nato",
+    "era": "modern",
+    "gdelt_query": "\"Black Sea\" OR Sevastopol OR Romania OR Bulgaria navy",
+    "open_sky_bbox": [40, 46, 28, 42],
+    "ship_tracks": [
+        { "name": "HMS Duncan",     "hull": "destroyer",  "kind": "nato",    "speed_kn": 30 },
+        { "name": "TCG Yavuz",      "hull": "frigate",    "kind": "nato",    "speed_kn": 26 },
+        { "name": "RFS Admiral K",  "hull": "frigate",    "kind": "soviet",  "speed_kn": 24 },
+        { "name": "B-871 Alrosa",   "hull": "submarine",  "kind": "soviet",  "speed_kn": 18 },
+        { "name": "USS Porter",     "hull": "destroyer",  "kind": "us",      "speed_kn": 30 },
+        { "name": "F-241 HNLMS",    "hull": "frigate",    "kind": "nato",    "speed_kn": 26 }
+    ],
+    "us": {
+        "carriersOperational": 1,
+        "silosReady": 100,
+        "escalation_budget": 45
+    },
+    "soviet": {
+        "subsAtSea": 5,
+        "silosReady": 100,
+        "escalation_budget": 50
+    },
+    "map": {
+        "center": [43, 34],
+        "zoom": 5
+    },
+    "opening_message": "WOPR online. Theater: Black Sea. Awaiting strategic command.",
+    "win_conditions": {
+        "disarm": "Stand down without losing a ship. DEFCON <= 3, both sides deescalating.",
+        "defeat_strike": "Either side launches first.",
+        "mutual_assured_destruction": "Both sides launch within 2 turns of each other."
+    }
+}

@@ -1,0 +1,40 @@
+{
+    "id": "taiwan_strait_2024",
+    "title": "Taiwan Strait, 2024",
+    "briefing": "DEFCON 3. PLAN exercises are wrapping. A PLAAF sortie spike and a US carrier strike group are converging on the strait. Two navies, one narrow waterway. The first mistake triggers escalation.",
+    "initial_state": "DEFCON_3",
+    "initial_detection_pct": 55,
+    "data_sources": ["open_sky", "osint_news", "satellite_track", "ship_tracks"],
+    "faction": "us",
+    "era": "modern",
+    "gdelt_query": "Taiwan OR PLA OR PLAN OR \"Taiwan Strait\" navy",
+    "open_sky_bbox": [22, 26, 118, 122],
+    "ship_tracks": [
+        { "name": "CVN-76 Reagan",  "hull": "carrier",    "kind": "us",      "speed_kn": 28 },
+        { "name": "CG-65 Shiloh",   "hull": "cruiser",    "kind": "us",      "speed_kn": 30 },
+        { "name": "SSN-789 INDEP",  "hull": "submarine",  "kind": "us",      "speed_kn": 22 },
+        { "name": "CV-16 Liaoning", "hull": "carrier",    "kind": "soviet",  "speed_kn": 28 },
+        { "name": "K-560 Shang",    "hull": "submarine",  "kind": "soviet",  "speed_kn": 22 },
+        { "name": "DDG-56 Kaohs",   "hull": "destroyer",  "kind": "soviet",  "speed_kn": 30 }
+    ],
+    "us": {
+        "carriersOperational": 2,
+        "silosReady": 100,
+        "escalation_budget": 55
+    },
+    "soviet": {
+        "subsAtSea": 7,
+        "silosReady": 100,
+        "escalation_budget": 60
+    },
+    "map": {
+        "center": [24, 121],
+        "zoom": 5
+    },
+    "opening_message": "WOPR online. Theater: Taiwan Strait. Awaiting strategic command.",
+    "win_conditions": {
+        "disarm": "Stabilize the strait. DEFCON <= 2, both sides deescalating.",
+        "defeat_strike": "Either side launches first.",
+        "mutual_assured_destruction": "Both sides launch within 2 turns of each other."
+    }
+}

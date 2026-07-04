@@ -1,0 +1,40 @@
+{
+    "id": "red_sea_2024",
+    "title": "Red Sea / Houthi Shipping Disruption, 2024",
+    "briefing": "DEFCON 4. Houthi anti-ship missiles have struck two commercial vessels in the Bab el-Mandeb. Operation Prosperity Guardian is escorting convoys. Iran has dispatched a frigate through the strait. The corridor carries 12% of global trade.",
+    "initial_state": "DEFCON_4",
+    "initial_detection_pct": 40,
+    "data_sources": ["open_sky", "osint_news", "satellite_track", "ship_tracks"],
+    "faction": "nato",
+    "era": "modern",
+    "gdelt_query": "Houthi OR \"Bab el-Mandeb\" OR \"Red Sea\" shipping OR \"Prosperity Guardian\" OR anti-ship missile",
+    "open_sky_bbox": [11, 22, 35, 48],
+    "ship_tracks": [
+        { "name": "USS Carney",       "hull": "destroyer",  "kind": "us",      "speed_kn": 30 },
+        { "name": "HMS Diamond",      "hull": "destroyer",  "kind": "nato",    "speed_kn": 30 },
+        { "name": "FS Bretagne",      "hull": "frigate",    "kind": "nato",    "speed_kn": 26 },
+        { "name": "IRIS Alvand",      "hull": "frigate",    "kind": "soviet",  "speed_kn": 24 },
+        { "name": "Houthi Fast-AT-3", "hull": "cutter",     "kind": "soviet",  "speed_kn": 28 },
+        { "name": "MV Torm Madison",  "hull": "merchant",   "kind": "merchant","speed_kn": 18 }
+    ],
+    "us": {
+        "carriersOperational": 0,
+        "silosReady": 100,
+        "escalation_budget": 35
+    },
+    "soviet": {
+        "subsAtSea": 2,
+        "silosReady": 100,
+        "escalation_budget": 45
+    },
+    "map": {
+        "center": [15, 42],
+        "zoom": 5
+    },
+    "opening_message": "WOPR online. Theater: Red Sea / Bab el-Mandeb. Awaiting strategic command.",
+    "win_conditions": {
+        "disarm": "Restore safe transit through Bab el-Mandeb without escalation.",
+        "defeat_strike": "Either side strikes first.",
+        "mutual_assured_destruction": "A commercial vessel is lost with a warship nearby."
+    }
+}

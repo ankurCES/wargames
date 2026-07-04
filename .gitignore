@@ -1,0 +1,13 @@
+/target/
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Old JS tree, archived and read-only — do not commit node_modules.
+old_data/node_modules/
+old_data/replays/
+old_data/saves/

@@ -1,0 +1,26 @@
+[package]
+name = "wargames-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Herdr-style panned TUI for WOPR Wargames."
+
+[[bin]]
+name = "wargames"
+path = "src/main.rs"
+
+[dependencies]
+wargames-core = { path = "../wargames-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }

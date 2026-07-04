@@ -1,0 +1,40 @@
+{
+    "id": "south_china_sea_2024",
+    "title": "South China Sea / Spratlys, 2024",
+    "briefing": "DEFCON 3. A PLAN carrier group has sortied from Hainan toward the Spratlys. A US CSG is steaming from Subic. CCG cutters have rammed a Philippine resupply vessel at Second Thomas Shoal. Both navies are now within strike range of every artificial island.",
+    "initial_state": "DEFCON_3",
+    "initial_detection_pct": 50,
+    "data_sources": ["open_sky", "osint_news", "satellite_track", "ship_tracks"],
+    "faction": "us",
+    "era": "modern",
+    "gdelt_query": "Spratly OR \"South China Sea\" OR Scarborough OR \"Second Thomas Shoal\" OR PLAN carrier Hainan",
+    "open_sky_bbox": [8, 18, 108, 122],
+    "ship_tracks": [
+        { "name": "CVN-76 Reagan",   "hull": "carrier",    "kind": "us",      "speed_kn": 28 },
+        { "name": "CG-65 Shiloh",    "hull": "cruiser",    "kind": "us",      "speed_kn": 30 },
+        { "name": "DDG-115 R. Smith","hull": "destroyer",  "kind": "us",      "speed_kn": 30 },
+        { "name": "CV-17 Shandong",  "hull": "carrier",    "kind": "soviet",  "speed_kn": 28 },
+        { "name": "FFG-54 Hengshui", "hull": "frigate",    "kind": "soviet",  "speed_kn": 26 },
+        { "name": "CCG-5901",        "hull": "cutter",     "kind": "soviet",  "speed_kn": 22 }
+    ],
+    "us": {
+        "carriersOperational": 1,
+        "silosReady": 100,
+        "escalation_budget": 50
+    },
+    "soviet": {
+        "subsAtSea": 6,
+        "silosReady": 100,
+        "escalation_budget": 65
+    },
+    "map": {
+        "center": [12, 114],
+        "zoom": 5
+    },
+    "opening_message": "WOPR online. Theater: South China Sea / Spratlys. Awaiting strategic command.",
+    "win_conditions": {
+        "disarm": "Deconflict the Spratlys without a kinetic exchange.",
+        "defeat_strike": "Either side fires first.",
+        "mutual_assured_destruction": "PLAN and US CSG lose a vessel in the same window."
+    }
+}

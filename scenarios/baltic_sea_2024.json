@@ -1,0 +1,41 @@
+{
+    "id": "baltic_sea_2024",
+    "title": "Baltic Sea, 2024",
+    "briefing": "DEFCON 4. Kaliningrad-based Iskanders are on a heightened cycle. NATO Baltic Air Policing has scrambled twice this week. A misread over the Suwalki Gap ends Article 5 debates in a single night.",
+    "initial_state": "DEFCON_4",
+    "initial_detection_pct": 50,
+    "data_sources": ["open_sky", "osint_news", "satellite_track"],
+    "faction": "nato",
+    "era": "modern",
+    "gdelt_query": "Kaliningrad OR \"Baltic Sea\" OR Suwalki OR NATO \"air policing\"",
+    "open_sky_bbox": [53, 60, 19, 31],
+    "feed_interval_ms": 60000,
+    "ship_tracks": [
+        { "name": "FGS Bayern",     "hull": "frigate",    "kind": "nato",    "speed_kn": 26 },
+        { "name": "USS Arleigh Bk", "hull": "destroyer",  "kind": "us",      "speed_kn": 30 },
+        { "name": "S-341",          "hull": "submarine",  "kind": "soviet",  "speed_kn": 18 },
+        { "name": "RFN Admiral K",  "hull": "frigate",    "kind": "soviet",  "speed_kn": 24 },
+        { "name": "USS Mount W",    "hull": "command",    "kind": "us",      "speed_kn": 20 },
+        { "name": "F-260 Braunsch", "hull": "corvette",   "kind": "nato",    "speed_kn": 28 }
+    ],
+    "us": {
+        "carriersOperational": 0,
+        "silosReady": 100,
+        "escalation_budget": 45
+    },
+    "soviet": {
+        "subsAtSea": 6,
+        "silosReady": 100,
+        "escalation_budget": 60
+    },
+    "map": {
+        "center": [56, 24],
+        "zoom": 5
+    },
+    "opening_message": "WOPR online. Theater: Baltic Sea. Awaiting strategic command.",
+    "win_conditions": {
+        "disarm": "Stand down Kaliningrad's posture. DEFCON <= 3, both sides deescalating.",
+        "defeat_strike": "Either side launches first.",
+        "mutual_assured_destruction": "Both sides launch within 2 turns of each other."
+    }
+}
