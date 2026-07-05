@@ -26,7 +26,8 @@ use wargames_core::engine::apply_action;
 use wargames_core::log::LogEntry;
 use wargames_core::predict::predict;
 use wargames_core::scenario::Scenario;
-use wargames_core::{Action, Posture, Side, SideState};
+use wargames_core::agents::{Agent, AgentId, AgentPersona, RecordedAction};
+use wargames_core::{Action, Faction, Posture, Side, SideState};
 use wargames_core::WorldState;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,6 +36,36 @@ pub enum Screen {
     Picker,
     Game,
     GameOver,
+}
+
+/// Mode flag for the Game screen. `PlayerVsWorld` is the historical behavior;
+/// `AiVsAi` runs the entire match with two learned agents deciding both sides,
+/// stepping on a self-driven tick.
+#[derive(Debug, Clone)]
+pub enum Mode {
+    PlayerVsWorld,
+    AiVsAi {
+        agent_a: Agent,
+        agent_b: Agent,
+        /// Last action each agent took, for the agent status pane.
+        last_actions: Vec<RecordedAction>,
+        /// Last reasoning snippet from each agent.
+        last_reasoning: [(String, String); 2],
+        /// When to step the world next.
+        next_step_at: Instant,
+        /// Tick interval. Default 800 ms — gives the eye time to read each
+        /// state, but fast enough to be visible.
+        tick: Duration,
+        /// Hard cap on turns per match — keeps a runaway loop from running
+        /// forever if neither side terminates.
+        max_turns_remaining: u32,
+    },
+}
+
+impl Mode {
+    pub fn is_ai_vs_ai(&self) -> bool {
+        matches!(self, Mode::AiVsAi { .. })
+    }
 }
 
 /// What is currently happening in the background, if anything. Drives the
@@ -94,6 +125,7 @@ pub struct App {
     /// Final action assembled from the streaming tool-use input deltas.
     /// `None` until the SSE stream ends.
     pub streaming_action: Option<String>,
+    pub mode: Mode,
 }
 
 impl App {
@@ -137,6 +169,7 @@ impl App {
             opponent_pending: false,
             streaming_message: String::new(),
             streaming_action: None,
+            mode: Mode::PlayerVsWorld,
         }
     }
 
@@ -222,6 +255,300 @@ impl App {
         self.status = format!("engaged — DEFCON {}", self.world.as_ref().unwrap().defcon);
     }
 
+    /// Dispatcher between `enter_game` and `enter_ai_vs_ai` based on the
+    /// selected country. The sentinel is the special `__ai_vs_ai__` hint.
+    fn enter_after_picker(&mut self) {
+        let ai_vs_ai = self
+            .picker
+            .selected_country()
+            .map(|c| c.hint.starts_with("__ai_vs_ai__"))
+            .unwrap_or(false);
+        if ai_vs_ai {
+            self.enter_ai_vs_ai();
+        } else {
+            self.enter_game();
+        }
+    }
+
+    /// Enter AI vs AI mode. Generates a scenario from the conflict corpus
+    /// using a time-derived seed, builds two `Agent`s with distinct
+    /// personas, and sets the `Mode` to drive a self-ticking match.
+    pub fn enter_ai_vs_ai(&mut self) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0xBEEF);
+        self.enter_ai_vs_ai_with_seed(seed);
+    }
+
+    /// AI vs AI entry point with a caller-supplied seed (CLI `--regen`
+    /// uses this — pass a fresh nanos value to force a new scenario).
+    pub fn enter_ai_vs_ai_with_seed(&mut self, seed: u64) {
+
+        // Theater picked deterministically from the seed across all 8.
+        let theaters = [
+            wargames_core::Theater::BalticSea,
+            wargames_core::Theater::BlackSea,
+            wargames_core::Theater::KoreanPeninsula,
+            wargames_core::Theater::TaiwanStrait,
+            wargames_core::Theater::SouthChinaSea,
+            wargames_core::Theater::RedSea,
+            wargames_core::Theater::EasternMed,
+            wargames_core::Theater::NorthAtlantic,
+        ];
+        let theater = theaters[(seed as usize) % theaters.len()];
+        let era = wargames_core::scenario::generator::sample_era(theater, seed);
+        let scenario =
+            wargames_core::scenario::generator::generate_scenario(theater, seed, Some(era), None);
+
+        // Build a sensible initial world. Mirrors `build_world` shape but
+        // skips the bundled JSON — the generator already produced a
+        // `Scenario`.
+        let mut sides = [
+            scenario.us.clone().unwrap_or_default(),
+            scenario.soviet.clone().unwrap_or_default(),
+        ];
+        // Make sure the openers aren't doomed-from-budget. The generator
+        // sometimes nudges toward 1.
+        if sides[0].escalation_budget < 20 {
+            sides[0].escalation_budget = 50;
+        }
+        if sides[1].escalation_budget < 20 {
+            sides[1].escalation_budget = 50;
+        }
+        // Latch the player's faction to Faction::Us (mode is symmetric).
+        let initial_state_id = match scenario.initial_state.as_deref() {
+            Some("DEFCON_5") => 5,
+            Some("DEFCON_4") => 4,
+            Some("DEFCON_3") => 3,
+            Some("DEFCON_2") => 2,
+            Some("DEFCON_1") => 1,
+            _ => 3,
+        };
+        let world = WorldState {
+            turn: 1,
+            era,
+            theater,
+            faction: Faction::Us,
+            defcon: initial_state_id,
+            tension: 40.0,
+            detection_pct: scenario.initial_detection_pct.unwrap_or(40.0),
+            sides,
+            log: vec![LogEntry::outcome(
+                1,
+                scenario.opening_message.clone().unwrap_or_default(),
+            )],
+            terminal: None,
+        };
+        self.world = Some(world);
+        self.scenario = Some(scenario);
+
+        let agent_a = Agent::new(
+            AgentId::AggressiveEscalator,
+            AgentPersona::escalator(),
+            Faction::Us,
+            era,
+        );
+        let agent_b = Agent::new(
+            AgentId::CalculatedDefender,
+            AgentPersona::defender(),
+            Faction::Nato,
+            era,
+        );
+
+        self.mode = Mode::AiVsAi {
+            agent_a,
+            agent_b,
+            last_actions: Vec::new(),
+            last_reasoning: Default::default(),
+            next_step_at: Instant::now() + Duration::from_millis(400),
+            tick: Duration::from_millis(800),
+            max_turns_remaining: 60,
+        };
+        self.screen = Screen::Game;
+        self.status = "AI vs AI engaged".to_string();
+        self.refresh_prediction();
+    }
+
+    /// Tick the AI vs AI match by one half-turn. Returns true if the match
+    /// advanced; false if the tick was suppressed (e.g. terminal already,
+    /// game over screen, prediction running, or `next_step_at` not reached).
+    pub fn step_ai_vs_ai(&mut self) -> bool {
+        // Bail-out reasons don't depend on the agents themselves.
+        if self.bg.is_busy() {
+            return false;
+        }
+        let Some(world) = self.world.as_ref() else {
+            return false;
+        };
+        if wargames_core::engine::is_terminal(world) {
+            return false;
+        }
+
+        // Pull the agents and the timing fields out of the enum so the rest
+        // of this method can mutate them without fighting the borrow checker.
+        let Mode::AiVsAi {
+            mut agent_a,
+            mut agent_b,
+            mut last_actions,
+            last_reasoning,
+            next_step_at,
+            tick,
+            mut max_turns_remaining,
+        } = std::mem::replace(&mut self.mode, Mode::PlayerVsWorld)
+        else {
+            return false;
+        };
+        let mut last_reasoning = last_reasoning;
+
+        // Don't step until the tick interval elapses.
+        if Instant::now() < next_step_at {
+            self.restore_ai_vs_ai(
+                agent_a,
+                agent_b,
+                last_actions,
+                last_reasoning,
+                next_step_at,
+                tick,
+                max_turns_remaining,
+            );
+            return false;
+        }
+        if max_turns_remaining == 0 {
+            self.status = "AI vs AI: turn budget exhausted".into();
+            self.restore_ai_vs_ai(
+                agent_a,
+                agent_b,
+                last_actions,
+                last_reasoning,
+                next_step_at,
+                tick,
+                0,
+            );
+            return false;
+        }
+
+        let mut state = world.clone();
+        // Alternate starting side by turn parity. Both halves advance here.
+        let sides: [Side; 2] = if state.turn.is_multiple_of(2) {
+            [Side::Us, Side::Opp]
+        } else {
+            [Side::Opp, Side::Us]
+        };
+
+        let mut advanced = false;
+        for side in sides {
+            if wargames_core::engine::is_terminal(&state) {
+                break;
+            }
+            let agent: &mut Agent = if side == Side::Us {
+                &mut agent_a
+            } else {
+                &mut agent_b
+            };
+            // Snapshot memory slices into owned vectors so the immutable
+            // borrow ends before `decide()` takes `&self` of the agent.
+            let own_recent: Vec<RecordedAction> = agent.memory.own.clone();
+            let opp_recent: Vec<RecordedAction> = agent.memory.opp.clone();
+            let view = wargames_core::agents::MemoryView {
+                world: &state,
+                own_side: side,
+                own_recent: &own_recent,
+                opp_recent: &opp_recent,
+            };
+            let (action, reasoning) = agent.decide(view);
+            agent.memory.record_own(state.turn, action);
+            agent.memory.set_reasoning(reasoning.clone());
+
+            last_actions.push(RecordedAction {
+                turn: state.turn,
+                action,
+            });
+            // Map side → slot index (Us = 0, Opp = 1) for the reasoning pane.
+            let slot = if side == Side::Us { 0 } else { 1 };
+            last_reasoning[slot] = (
+                agent.id.display().to_string(),
+                reasoning.as_str().to_string(),
+            );
+
+            state = apply_action(&state, side, action);
+            advanced = true;
+        }
+
+        // Cap the actions log so it doesn't grow unbounded.
+        if last_actions.len() > 64 {
+            let drop = last_actions.len() - 64;
+            last_actions.drain(0..drop);
+        }
+        if advanced {
+            max_turns_remaining = max_turns_remaining.saturating_sub(1);
+        }
+
+        if let Some(w) = self.world.as_mut() {
+            *w = state;
+        }
+        let new_next_step_at = Instant::now() + tick;
+        self.restore_ai_vs_ai(
+            agent_a,
+            agent_b,
+            last_actions,
+            last_reasoning,
+            new_next_step_at,
+            tick,
+            max_turns_remaining,
+        );
+        if advanced {
+            self.refresh_prediction();
+            self.after_step_check_terminal();
+        }
+        advanced
+    }
+
+    /// Move agents + timing back into `self.mode`. Used by `step_ai_vs_ai`
+    /// after `mem::replace` extracted them.
+    fn restore_ai_vs_ai(
+        &mut self,
+        agent_a: Agent,
+        agent_b: Agent,
+        last_actions: Vec<RecordedAction>,
+        last_reasoning: [(String, String); 2],
+        next_step_at: Instant,
+        tick: Duration,
+        max_turns_remaining: u32,
+    ) {
+        self.mode = Mode::AiVsAi {
+            agent_a,
+            agent_b,
+            last_actions,
+            last_reasoning,
+            next_step_at,
+            tick,
+            max_turns_remaining,
+        };
+    }
+
+    fn after_step_check_terminal(&mut self) {
+        let Some(w) = self.world.as_ref() else {
+            return;
+        };
+        if wargames_core::engine::is_terminal(w) {
+            self.screen = Screen::GameOver;
+            self.game_over_message =
+                wargames_core::engine::game_over(w).map(|o| match o {
+                    wargames_core::GameOutcome::Strike { by, .. } => {
+                        format!("STRIKE by {:?}", by)
+                    }
+                    wargames_core::GameOutcome::Disarm { by, .. } => {
+                        format!("DISARM by {:?}", by)
+                    }
+                    wargames_core::GameOutcome::Defect { by, .. } => {
+                        format!("DEFECT by {:?}", by)
+                    }
+                });
+        }
+    }
+
     pub fn handle_picker_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Esc => {
@@ -270,10 +597,10 @@ impl App {
                 //      picker would be stuck on the Scenario step after
                 //      the user confirms their selection.
                 if done && !self.bg.is_busy() {
-                    self.enter_game();
+                    self.enter_after_picker();
                 } else if done && step_before == PickerStep::Scenario {
                     self.bg = BgOp::Idle;
-                    self.enter_game();
+                    self.enter_after_picker();
                 } else if step_before == PickerStep::Country
                     && self.picker.step == PickerStep::Scenario
                 {
@@ -293,6 +620,17 @@ impl App {
         // Block input during background work so the user can't double-fire.
         if self.bg.is_busy() && !matches!(code, KeyCode::Esc) {
             return false;
+        }
+        // In AI vs AI mode the game runs itself — Esc still exits.
+        if self.mode.is_ai_vs_ai() {
+            return match code {
+                KeyCode::Esc => true,
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    self.refresh_prediction();
+                    false
+                }
+                _ => false,
+            };
         }
         match code {
             KeyCode::Esc => true,
@@ -466,13 +804,20 @@ impl App {
                 if matches!(self.screen, Screen::Picker)
                     && matches!(self.picker.step, PickerStep::Scenario)
                 {
-                    self.enter_game();
+                    self.enter_after_picker();
                 }
             }
         }
         // Advance the spinner when work is in flight so the user sees motion.
         if self.bg.is_busy() {
             self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        }
+        // Tick the AI vs AI match on every render — render runs at ~20 fps
+        // (50 ms tick); step_ai_vs_ai gates itself on `next_step_at` so
+        // the perceived rate is governed by Mode::AiVsAi.tick (default
+        // 800 ms). No other state machine path touches the world here.
+        if matches!(self.screen, Screen::Game) && self.mode.is_ai_vs_ai() {
+            let _ = self.step_ai_vs_ai();
         }
         match self.screen {
             Screen::Splash => {
@@ -832,10 +1177,18 @@ mod playable_flow_tests {
         // providers, so `App::new` constructs no `LlmClient` and the
         // heuristic opponent is the one that runs in-game.
         let mut path = std::env::temp_dir();
+        // Filename must be unique across parallel tests — `process::id()`
+        // alone collides if the same line is reached from two threads. A
+        // nanoseconds-from-UNIX_EPOCH suffix keeps it unique without
+        // making the test async-only.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         path.push(format!(
             "wargames_playable_{}_{}.json",
             std::process::id(),
-            line!()
+            nanos
         ));
         let payload = br#"{"providers":{},"router":{},"voice":null}"#;
         std::fs::write(&path, payload).expect("write settings fixture");
@@ -848,6 +1201,7 @@ mod playable_flow_tests {
         let mut app = App::new(settings, dir);
         // Skip splash so the picker is immediately testable.
         app.skip_splash();
+        app.bg = BgOp::Idle;
         app
     }
 
@@ -1113,5 +1467,146 @@ mod playable_flow_tests {
             "rendered buffer must show a loading affordance (phase verb / LOADING label) \
              during the ScenarioLoad transition",
         );
+    }
+
+    // -- AI vs AI mode ---------------------------------------------------
+
+    #[test]
+    fn enter_ai_vs_ai_creates_generated_scenario_and_advances_world() {
+        // Wiring proof: selecting the sentinel country + Enter must put us
+        // into AI vs AI mode with a generated scenario and a non-zero world
+        // turn after the first tick.
+        let mut app = fresh_app();
+
+        // Move the highlight down past the canonical 5 countries to the
+        // sentinel `__ai_vs_ai__` country at index 5.
+        for _ in 0..5 {
+            app.handle_picker_key(KeyCode::Down);
+        }
+        let sel = app.picker.selected_country();
+        assert!(sel.is_some());
+        assert!(
+            sel.unwrap().hint.starts_with("__ai_vs_ai__"),
+            "expected sentinel country, got hint={:?}",
+            sel.map(|c| c.hint.clone())
+        );
+
+        // Enter — should route through `enter_after_picker` and into
+        // `enter_ai_vs_ai`.
+        app.handle_picker_key(KeyCode::Enter);
+        // The picker might still be on Scenario step — send another Enter
+        // so the second picker transition fires.
+        app.handle_picker_key(KeyCode::Enter);
+        // Force a render tick.
+        app.bg = BgOp::Idle;
+
+        // We should now be in Game, with `mode = AiVsAi` and a world.
+        assert!(
+            app.mode.is_ai_vs_ai(),
+            "expected Mode::AiVsAi, got Mode::PlayerVsWorld"
+        );
+        assert_eq!(app.screen, Screen::Game);
+        assert!(
+            app.world.is_some(),
+            "AI vs AI mode must produce an initial world"
+        );
+
+        // Step a few times by directly calling the public `step_ai_vs_ai`.
+        // The first call may return false (cold start, no tick yet) or
+        // immediately take a half-turn; either way the world `turn` should
+        // advance once the underlying tick interval elapses.
+        let baseline_turn = app.world.as_ref().unwrap().turn;
+        // Force the next step to fire immediately.
+        if let Mode::AiVsAi { next_step_at, .. } = &mut app.mode {
+            *next_step_at = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(10))
+                .unwrap();
+        }
+        for _ in 0..40 {
+            let _ = app.step_ai_vs_ai();
+            // Bring forward any subsequent tick clock so the next call
+            // won't be gated.
+            if let Mode::AiVsAi { next_step_at, .. } = &mut app.mode {
+                *next_step_at = std::time::Instant::now()
+                    .checked_sub(std::time::Duration::from_millis(10))
+                    .unwrap();
+            }
+            if app.world.as_ref().unwrap().turn > baseline_turn {
+                break;
+            }
+        }
+        let advanced_turn = app.world.as_ref().unwrap().turn;
+        assert!(
+            advanced_turn > baseline_turn,
+            "AI vs AI did not advance world.turn (stuck at {})",
+            baseline_turn
+        );
+
+        // Both agents must have recorded at least one action in memory.
+        if let Mode::AiVsAi { agent_a, agent_b, .. } = &app.mode {
+            assert!(!agent_a.memory.own.is_empty(), "agent A never acted");
+            assert!(!agent_b.memory.own.is_empty(), "agent B never acted");
+        } else {
+            panic!("mode should still be AiVsAi");
+        }
+    }
+
+    #[test]
+    fn ai_vs_ai_blocks_player_input_but_allows_esc_and_predict() {
+        // In AI vs AI mode the action menu is disabled — Enter must not
+        // crash, must not double-apply a player action. Esc still exits.
+        let mut app = fresh_app();
+        for _ in 0..5 {
+            app.handle_picker_key(KeyCode::Down);
+        }
+        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter);
+        app.bg = BgOp::Idle;
+        assert!(app.mode.is_ai_vs_ai());
+
+        // Pressing Enter / Up / Down while in Game must not panic and
+        // must not crash the LLM client path (which doesn't exist in this
+        // fixture but is what `handle_game_key` would otherwise call).
+        app.handle_game_key(KeyCode::Enter);
+        app.handle_game_key(KeyCode::Up);
+        app.handle_game_key(KeyCode::Down);
+
+        // 'p' still works — manual prediction refresh should not panic.
+        app.handle_game_key(KeyCode::Char('p'));
+    }
+
+    #[test]
+    fn sentinel_country_routes_picker_enter_to_ai_vs_ai_not_player_game() {
+        // Focused regression: the picker entry for the sentinel country
+        // must never reach `enter_game` — that path uses the scenario
+        // step and a bundled scenario JSON, neither of which apply here.
+        let mut app = fresh_app();
+        for _ in 0..5 {
+            app.handle_picker_key(KeyCode::Down);
+        }
+        let sel = app.picker.selected_country().cloned();
+        assert!(
+            sel.as_ref().map(|c| c.hint.starts_with("__ai_vs_ai__")).unwrap_or(false)
+        );
+        app.handle_picker_key(KeyCode::Enter);
+        // After Enter, we should be somewhere other than "waiting in picker"
+        // — either on Game (best) or stuck on Scenario step but in AiVsAi
+        // mode. Both are acceptable; the bug we're guarding against is
+        // getting stuck with a non-AiVsAi mode.
+        app.bg = BgOp::Idle;
+        // The cheapest unambiguous invariant: scenario.id starts with
+        // the synthetic seed prefix when we ended up in Game.
+        if app.screen == Screen::Game {
+            let id = app
+                .scenario
+                .as_ref()
+                .map(|s| s.id.clone())
+                .unwrap_or_default();
+            assert!(
+                id.contains("_gen_"),
+                "sentinel country must produce a generated scenario, got id={}",
+                id
+            );
+        }
     }
 }

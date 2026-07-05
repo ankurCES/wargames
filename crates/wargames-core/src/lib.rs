@@ -10,6 +10,7 @@
 //! - [`log`]: `LogEntry` + helpers.
 
 pub mod actions;
+pub mod agents;
 pub mod engine;
 pub mod log;
 pub mod predict;

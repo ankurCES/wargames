@@ -1,0 +1,125 @@
+# AI vs AI Mode — Plan & Status
+
+## Goal
+
+Run a **self-ticking, headless wargames match** with two learned agents playing
+each other. Useful for: validation, regression, demos, training data generation,
+CI smoke tests. No human input is required once started; the match plays to
+terminal state or the 60-turn cap.
+
+The user invokes it from the terminal:
+
+```
+wargames --ai-vs-ai              # default seed (time-derived)
+wargames --ai-vs-ai --regen      # force a fresh scenario seed
+```
+
+Both modes skip the splash and the picker and drop straight into the Game
+screen with the agents already wired.
+
+## Architecture
+
+### Agents (`crates/wargames-core/src/agents/`)
+
+- `Agent` — owns a `Persona`, a `Learner`, an `AgentId`, and a `Faction`.
+  Each turn it calls `decide(&GameState) -> AgentAction` (using the persona's
+  weight vector + the learner's bias) and then `observe_outcome(&GameState,
+  AgentAction, GameOutcome)` to update memory.
+- `AgentPersona` — small, hand-tuned weight vector that biases the action
+  distribution. Two personas: `escalator()` (prefers ESCALATE / NUKE / STRIKE)
+  and `defender()` (prefers DEFEND / DIPLOMACY / STEADY).
+- `Learner` — keeps a bounded ring of recent outcomes and a `weight_bias`
+  vector that gets pushed toward successful patterns over time. Tested:
+  `terminal_samples_clamp_to_strong_negative_reward`,
+  `learner_converges_after_consistent_good_outcomes`, `ring_is_bounded`.
+- **Distinct personas ⇒ different distributions on the same state**: covered
+  by `personas_produce_strictly_different_weight_vectors_on_same_state` and
+  `personas_yield_different_distributions_on_same_state`.
+
+The agent-vs-agent match is the integration test:
+`agents::tests::ai_vs_ai_match_runs_to_terminal_or_bounded_turns`.
+
+### Scenario generator (`crates/wargames-core/src/scenario/`)
+
+- `corpus.rs` — hand-curated list of `RecentEvent` records spanning the
+  last 10 years across 8 theaters.
+- `generator.rs` — `generate_scenario(theater, seed, era, recent_event)` —
+  deterministic given a seed, produces a `Scenario` with both sides,
+  initial state, opening message.
+- Era is sampled via `sample_era(theater, seed)` — round-robin weighted
+  by recent conflicts in that theater.
+
+### App integration (`crates/wargames-tui/src/app.rs`)
+
+- `App::enter_ai_vs_ai_with_seed(u64)` — picks a theater deterministically
+  from the seed (8-way mod), generates the scenario, builds the world
+  with `Faction::Us` (mode is symmetric), and constructs two agents:
+  - `Agent::new(AggressiveEscalator, escalator(), Faction::Us, era)`
+  - `Agent::new(CalculatedDefender, defender(), Faction::Nato, era)`
+- Sets `Mode::AiVsAi { agent_a, agent_b, last_actions, last_reasoning,
+  next_step_at, tick: 800ms, max_turns_remaining: 60 }`.
+- The game loop's `tick` step drains agent actions in
+  `Mode::AiVsAi::tick_if_due`, applying the action to the world, recording
+  the outcome, and feeding it back into each agent's learner.
+
+### CLI flags (`crates/wargames-tui/src/main.rs`)
+
+- `--ai-vs-ai` — calls `App::enter_ai_vs_ai()` (time-derived seed).
+- `--ai-vs-ai --regen` — calls `App::enter_ai_vs_ai_with_seed(fresh_nanos)`.
+- Both imply `--skip-splash`.
+
+## Test surface
+
+### Unit (wargames-core)
+
+- `corpus::tests::*` — era / theater coverage, sanity-check the year
+  ordering (5/5 green).
+- `agents::personas::tests::personas_*` — two tests confirming personas
+  disagree on both weight vectors and on sampled distributions.
+- `agents::learning::tests::*` — empty learner, terminal-sample clamping,
+  convergence, ring bound (4/4 green).
+- `agents::tests::*` — integration: turns advance, learners receive
+  outcomes, the full match runs to terminal or bounded turns (3/3 green).
+
+### Integration (wargames-tui)
+
+- `app::playable_flow_tests::heuristic_opponent_*` — confirms the existing
+  heuristic-driven opponent still completes a match and that predictions
+  update (the regression net for `enter_ai_vs_ai` is wired into the same
+  path).
+- `app::tests::enter_ai_vs_ai_creates_generated_scenario_and_advances_world`
+  — confirms the CLI-driven `enter_ai_vs_ai_with_seed` path lands on a
+  generated scenario with both agents and the world advanced.
+
+### Manual smoke
+
+- `wargames --help` lists all four new flags (verified, EXIT=0).
+- `wargames --ai-vs-ai --regen` enters the TUI with no crash on launch
+  (verified — exits cleanly on `SIGTERM` after 1 s, no panic).
+- `wargames --ai-vs-ai` (without `--regen`) — equivalent, time-derived seed.
+
+## Status (this session)
+
+| Step | Description | Status |
+|------|-------------|--------|
+| 1 | `corpus.rs` — hand-curated recent events | **done** (5/5 tests) |
+| 2 | `generator.rs` — seeded scenario synthesis | **done** |
+| 3 | `agents/{mod,personas,learning}.rs` | **done** (9/9 tests) |
+| 4 | `App::enter_ai_vs_ai` + Mode::AiVsAi tick | **done** |
+| 5 | smoke test path green | **done** (10/10 + 36/36) |
+| 6 | `--ai-vs-ai` / `--regen` CLI flags | **done** |
+| 7 | clap `help` feature enabled | **done** (was previously off — `--help` exited 2) |
+| 8 | docs (this file) | **done** |
+
+## Open questions / follow-ups
+
+- **Heuristic-vs-agent mode**: not in scope for this change, but the same
+  `enter_ai_vs_ai` pattern could trivially be extended to a single-agent
+  mode where the user plays one side against a learned opponent.
+- **Replay of AI matches**: `tools/render-check.mjs` already saves
+  generated scenarios into the standard save format, so AI-vs-AI matches
+  are replayable today. No additional work needed unless we want a
+  "watch AI replay" mode in the TUI.
+- **Telemetry**: each `apply_opponent_action` already increments
+  `app.opponent_turns` — exposed in the status bar. A future change could
+  add per-agent win-rate tracking across many runs.

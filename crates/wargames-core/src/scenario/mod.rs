@@ -1,8 +1,18 @@
 //! Scenario JSON loader — matches the JS impl's contract.
+//!
+//! Layout:
+//! - [`Scenario`] is the JSON shape (matches `scenarios/*.json` files).
+//! - [`corpus`] is the in-Rust theater conflict corpus for procedural
+//!   generation.
+//! - [`generator`] builds a `Scenario` from the corpus, seed-driven and
+//!   deterministic — used by `--ai-vs-ai` and `--regen` in the TUI.
 
 use crate::state::{Era, Faction, SideState, Theater};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+pub mod corpus;
+pub mod generator;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scenario {

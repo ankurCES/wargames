@@ -331,6 +331,14 @@ pub fn default_countries() -> Vec<Country> {
             faction: Faction::Dprk,
             hint: "Limited arsenal, high noise".to_string(),
         },
+        // Sentinel: select this and Enter to enter AI vs AI mode. The
+        // hint string is the contract — the App layer keys off it. Kept
+        // here (rather than in App) so the picker always shows it
+        // without an extra App-side hookup.
+        Country {
+            faction: Faction::Us,
+            hint: "__ai_vs_ai__ two agents fight the war end-to-end with separate personas + learning".to_string(),
+        },
     ]
 }
 

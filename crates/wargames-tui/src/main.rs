@@ -45,6 +45,20 @@ struct Cli {
     /// Mostly useful for the e2e smoke test.
     #[arg(long)]
     skip_splash: bool,
+    /// Enter AI vs AI mode immediately: skip the picker and start a match
+    /// driven by two learned agents (separate personas + separate
+    /// memory + adaptive learner). The scenario is generated from the
+    /// conflict corpus using the current time as a seed. Implies
+    /// `--skip-splash`. Combine with `--regen` to force a fresh
+    /// scenario every launch.
+    #[arg(long)]
+    ai_vs_ai: bool,
+    /// Force a fresh generated scenario (and, if used with `--ai-vs-ai`,
+    /// a fresh seed). Without this flag the AI-vs-AI path uses
+    /// time-derived seeds which vary between launches but are stable
+    /// across saves.
+    #[arg(long)]
+    regen: bool,
 }
 
 /// Resolve the default scenarios directory at runtime: prefer
@@ -105,8 +119,22 @@ fn main() -> std::process::ExitCode {
         .unwrap_or_else(default_scenarios_dir);
 
     let mut app = App::new(settings, scenarios_dir);
-    if cli.skip_splash {
+    if cli.skip_splash || cli.ai_vs_ai {
         app.skip_splash();
+    }
+    if cli.ai_vs_ai {
+        // `--regen` forces a fresh nanos seed so two consecutive
+        // `--ai-vs-ai --regen` runs produce different scenarios.
+        if cli.regen {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let seed = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0xBEEF);
+            app.enter_ai_vs_ai_with_seed(seed);
+        } else {
+            app.enter_ai_vs_ai();
+        }
     }
 
     let mut terminal = ratatui::init();
