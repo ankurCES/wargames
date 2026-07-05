@@ -143,7 +143,12 @@ impl App {
         // exact (a) bug the user has been reporting.
         let scenarios_dir = resolve_scenarios_dir(scenarios_dir);
         let scenarios = load_scenarios(&scenarios_dir);
-        let picker = Picker::new(default_countries(), scenarios);
+        let picker = Picker::new(
+            crate::picker::default_modes(),
+            default_countries(),
+            scenarios,
+            crate::picker::default_theaters(),
+        );
         let status = match llm {
             Some(_) => "LLM ready".to_string(),
             None => "no LLM in settings — opponent will use heuristic".to_string(),
@@ -239,7 +244,11 @@ impl App {
             self.status = "no country selected".into();
             return;
         };
-        let Some(entry) = self.picker.selected_scenario().cloned() else {
+        // In Human vs AI mode the Scenario step holds a bundled entry.
+        // Pattern-match the discriminated union returned by the picker.
+        let Some(crate::picker::SelectedScenario::Bundled(entry)) =
+            self.picker.selected_scenario()
+        else {
             self.status = "no scenario selected".into();
             return;
         };
@@ -250,29 +259,53 @@ impl App {
         let world = build_world(&scenario, country.faction);
         self.world = Some(world);
         self.scenario = Some(scenario);
-        self.scenario_entry = Some(entry);
+        self.scenario_entry = Some(entry.clone());
         self.screen = Screen::Game;
         self.status = format!("engaged — DEFCON {}", self.world.as_ref().unwrap().defcon);
     }
 
-    /// Dispatcher between `enter_game` and `enter_ai_vs_ai` based on the
-    /// selected country. The sentinel is the special `__ai_vs_ai__` hint.
+    /// Dispatcher: route to the right game-entry function based on the
+    /// mode chosen on the Mode step and the scenario/theater chosen on
+    /// the Scenario step. Each step in the picker is explicit — by the
+    /// time this runs, the player has pressed Enter on Mode, Country,
+    /// *and* Scenario.
     fn enter_after_picker(&mut self) {
-        let ai_vs_ai = self
-            .picker
-            .selected_country()
-            .map(|c| c.hint.starts_with("__ai_vs_ai__"))
-            .unwrap_or(false);
-        if ai_vs_ai {
-            self.enter_ai_vs_ai();
-        } else {
-            self.enter_game();
+        use crate::picker::{ModeChoice, SelectedScenario};
+        match self.picker.mode {
+            ModeChoice::HumanVsAi => self.enter_game(),
+            ModeChoice::AiVsAi => {
+                // The Scenario step in AI vs AI mode is the theater
+                // picker. `selected_scenario()` returns a `TheaterEntry`
+                // whose `(theater, seed)` we feed into the seed-driven
+                // generator.
+                let (theater, seed, faction_override) = match self
+                    .picker
+                    .selected_scenario()
+                {
+                    Some(SelectedScenario::Theater(t)) => {
+                        let faction = self
+                            .picker
+                            .selected_country()
+                            .map(|c| c.faction);
+                        (t.theater, t.seed, faction)
+                    }
+                    // No theater selected (defensive — shouldn't happen
+                    // because advance() guards against empty lists in
+                    // AiVsAi mode).
+                    _ => {
+                        self.status =
+                            "no theater selected — pick one and press Enter".into();
+                        return;
+                    }
+                };
+                self.enter_ai_vs_ai_for(theater, seed, faction_override);
+            }
         }
     }
 
-    /// Enter AI vs AI mode. Generates a scenario from the conflict corpus
-    /// using a time-derived seed, builds two `Agent`s with distinct
-    /// personas, and sets the `Mode` to drive a self-ticking match.
+    /// Enter AI vs AI mode with a fresh time-derived seed. CLI entry point
+    /// (`wargames --ai-vs-ai`) — the picker uses `enter_ai_vs_ai_for`
+    /// directly with the user-chosen theater.
     pub fn enter_ai_vs_ai(&mut self) {
         use std::time::{SystemTime, UNIX_EPOCH};
         let seed = SystemTime::now()
@@ -284,9 +317,8 @@ impl App {
 
     /// AI vs AI entry point with a caller-supplied seed (CLI `--regen`
     /// uses this — pass a fresh nanos value to force a new scenario).
+    /// Derives a theater from the seed across all 8.
     pub fn enter_ai_vs_ai_with_seed(&mut self, seed: u64) {
-
-        // Theater picked deterministically from the seed across all 8.
         let theaters = [
             wargames_core::Theater::BalticSea,
             wargames_core::Theater::BlackSea,
@@ -298,9 +330,27 @@ impl App {
             wargames_core::Theater::NorthAtlantic,
         ];
         let theater = theaters[(seed as usize) % theaters.len()];
+        self.enter_ai_vs_ai_for(theater, seed, None);
+    }
+
+    /// Picker-driven AI vs AI entry: the player has already chosen the
+    /// theater, the seed (deterministic per theater), and the faction
+    /// they want to play as. `faction_override` is `None` for the CLI
+    /// path (mode is symmetric) and `Some(_)` when the picker routed
+    /// through the country step.
+    pub fn enter_ai_vs_ai_for(
+        &mut self,
+        theater: wargames_core::Theater,
+        seed: u64,
+        faction_override: Option<wargames_core::Faction>,
+    ) {
         let era = wargames_core::scenario::generator::sample_era(theater, seed);
-        let scenario =
-            wargames_core::scenario::generator::generate_scenario(theater, seed, Some(era), None);
+        let scenario = wargames_core::scenario::generator::generate_scenario(
+            theater,
+            seed,
+            Some(era),
+            faction_override,
+        );
 
         // Build a sensible initial world. Mirrors `build_world` shape but
         // skips the bundled JSON — the generator already produced a
@@ -317,7 +367,9 @@ impl App {
         if sides[1].escalation_budget < 20 {
             sides[1].escalation_budget = 50;
         }
-        // Latch the player's faction to Faction::Us (mode is symmetric).
+        // Latch the player's faction — defaults to Us in the CLI path;
+        // the picker passes the country the user actually chose.
+        let faction = faction_override.unwrap_or(Faction::Us);
         let initial_state_id = match scenario.initial_state.as_deref() {
             Some("DEFCON_5") => 5,
             Some("DEFCON_4") => 4,
@@ -330,7 +382,7 @@ impl App {
             turn: 1,
             era,
             theater,
-            faction: Faction::Us,
+            faction,
             defcon: initial_state_id,
             tension: 40.0,
             detection_pct: scenario.initial_detection_pct.unwrap_or(40.0),
@@ -344,16 +396,24 @@ impl App {
         self.world = Some(world);
         self.scenario = Some(scenario);
 
+        // Two agents, distinct personas, one player-aligned + one
+        // opponent-aligned. The picker-driven faction determines which
+        // side the player-controlled agent represents; the other agent
+        // runs the opposing persona.
+        let (player_faction, opp_faction) = match faction {
+            Faction::Soviet | Faction::Prc | Faction::Dprk => (Faction::Soviet, Faction::Us),
+            _ => (Faction::Us, Faction::Nato),
+        };
         let agent_a = Agent::new(
             AgentId::AggressiveEscalator,
             AgentPersona::escalator(),
-            Faction::Us,
+            player_faction,
             era,
         );
         let agent_b = Agent::new(
             AgentId::CalculatedDefender,
             AgentPersona::defender(),
-            Faction::Nato,
+            opp_faction,
             era,
         );
 
@@ -367,7 +427,11 @@ impl App {
             max_turns_remaining: 60,
         };
         self.screen = Screen::Game;
-        self.status = "AI vs AI engaged".to_string();
+        self.status = format!(
+            "AI vs AI engaged — {} as {}",
+            theater.display_name(),
+            faction.display_name()
+        );
         self.refresh_prediction();
     }
 
@@ -552,11 +616,11 @@ impl App {
     pub fn handle_picker_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Esc => {
-                if self.picker.back() {
-                    false
-                } else {
-                    true
-                }
+                // `back()` returns true only when the player has backed
+                // out of the picker entirely (Esc on the Mode step).
+                // That should quit. Anything else — stepping back from
+                // Scenario or Country — stays in the picker.
+                self.picker.back()
             }
             KeyCode::Up => {
                 self.picker.prev();
@@ -956,14 +1020,24 @@ impl App {
 
 fn picker_status(picker: &Picker) -> String {
     match picker.step {
+        PickerStep::Mode => format!(
+            "pick a mode (↑↓ select, Enter confirm) — {} available",
+            picker.modes.len()
+        ),
         PickerStep::Country => format!(
-            "pick a country (↑↓ select, Enter confirm) — {} available",
+            "pick a country (↑↓ select, Enter confirm, Esc back) — {} available",
             picker.countries.len()
         ),
-        PickerStep::Scenario => format!(
-            "pick a scenario (↑↓ select, Enter confirm, Esc back) — {} filtered",
-            picker.filtered_scenarios().len()
-        ),
+        PickerStep::Scenario => match picker.mode {
+            crate::picker::ModeChoice::HumanVsAi => format!(
+                "pick a scenario (↑↓ select, Enter confirm, Esc back) — {} filtered",
+                picker.filtered_scenarios().len()
+            ),
+            crate::picker::ModeChoice::AiVsAi => format!(
+                "pick a theater for AI vs AI (↑↓ select, Enter confirm, Esc back) — {} available",
+                picker.theaters.len()
+            ),
+        },
     }
 }
 
@@ -1171,7 +1245,6 @@ mod playable_flow_tests {
     /// real `App` rather than mocking fields keeps the test honest: every
     /// piece of state set in `App::new` is exercised.
     fn fresh_app() -> App {
-        // `BlumiSettings` doesn't derive `Default` (only `Deserialize`),
         // so build a minimal-but-valid settings JSON on disk and load it
         // through `BlumiSettings::from_path`. The resulting struct has no
         // providers, so `App::new` constructs no `LlmClient` and the
@@ -1219,9 +1292,13 @@ mod playable_flow_tests {
     fn country_to_scenario_to_game_is_reachable() {
         let mut app = fresh_app();
         assert_eq!(app.screen, Screen::Picker);
+        assert_eq!(app.picker.step, PickerStep::Mode);
+
+        // 1) Enter on the mode step → moves to country (default HumanVsAi).
+        app.handle_picker_key(KeyCode::Enter);
         assert_eq!(app.picker.step, PickerStep::Country);
 
-        // 1) Enter on the country step → moves to scenario, shows spinner.
+        // 2) Enter on the country step → moves to scenario, shows spinner.
         app.handle_picker_key(KeyCode::Enter);
         assert_eq!(app.picker.step, PickerStep::Scenario);
         assert!(
@@ -1234,7 +1311,7 @@ mod playable_flow_tests {
             "country selection must produce either visible scenarios or an error"
         );
 
-        // 2) Enter on the scenario step → game screen, world populated.
+        // 3) Enter on the scenario step → game screen, world populated.
         app.handle_picker_key(KeyCode::Enter);
         assert_eq!(app.screen, Screen::Game, "Enter at scenario must enter Game");
         assert!(app.world.is_some(), "game screen must have a world");
@@ -1249,7 +1326,8 @@ mod playable_flow_tests {
     #[test]
     fn commit_action_advances_turn_and_requests_opponent() {
         let mut app = fresh_app();
-        // Drive to the game screen.
+        // Drive to the game screen: Mode → Country → Scenario.
+        app.handle_picker_key(KeyCode::Enter); // Mode
         app.handle_picker_key(KeyCode::Enter); // Country
         app.handle_picker_key(KeyCode::Enter); // Scenario
         assert_eq!(app.screen, Screen::Game);
@@ -1275,6 +1353,7 @@ mod playable_flow_tests {
     #[test]
     fn heuristic_opponent_completes_and_prediction_updates() {
         let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Mode
         app.handle_picker_key(KeyCode::Enter); // Country
         app.handle_picker_key(KeyCode::Enter); // Scenario
         app.handle_game_key(KeyCode::Enter); // player action
@@ -1301,6 +1380,7 @@ mod playable_flow_tests {
     #[test]
     fn full_playthrough_loop_is_stable_for_many_turns() {
         let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Mode
         app.handle_picker_key(KeyCode::Enter); // Country
         app.handle_picker_key(KeyCode::Enter); // Scenario
         // Up/Down on the action menu must not panic, must keep selection
@@ -1340,7 +1420,8 @@ mod playable_flow_tests {
         // (b) proof: spinner state must be set on Country→Scenario transition
         // so the progress bar the user asked for actually fires.
         let mut app = fresh_app();
-        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter); // Mode → Country
+        app.handle_picker_key(KeyCode::Enter); // Country → Scenario
         assert!(
             matches!(app.bg, BgOp::ScenarioLoad { .. }),
             "spinner must trigger on country→scenario step"
@@ -1369,7 +1450,7 @@ mod playable_flow_tests {
         .expect("TestBackend terminal constructs");
         let mut app = fresh_app();
         assert_eq!(app.screen, Screen::Picker);
-        assert_eq!(app.picker.step, PickerStep::Country);
+        assert_eq!(app.picker.step, PickerStep::Mode);
 
         terminal.draw(|f| app.render(f)).expect("render succeeds");
         // Use the test backend's internal buffer (the one `draw` wrote to),
@@ -1386,20 +1467,15 @@ mod playable_flow_tests {
             .collect();
 
         assert!(
-            rendered.contains("PICK A COUNTRY"),
-            "rendered buffer must show the country picker title",
+            rendered.contains("PICK A MODE"),
+            "rendered buffer must show the mode picker title",
         );
-        // At least one country from `default_countries()` must be visible.
-        // default_countries() starts with US, then Soviet, NATO, PRC, DPRK.
-        let any_country = rendered.contains("USA")
-            || rendered.contains("Soviet")
-            || rendered.contains("NATO")
-            || rendered.contains("PRC")
-            || rendered.contains("DPRK")
-            || rendered.contains("United States");
+        // At least one mode from `default_modes()` must be visible.
+        let any_mode = rendered.contains("Human vs AI")
+            || rendered.contains("AI vs AI");
         assert!(
-            any_country,
-            "rendered buffer must show at least one country from default_countries()"
+            any_mode,
+            "rendered buffer must show at least one mode from default_modes()"
         );
         // THE bug the user reported: the phantom empty-state on the
         // Country step, before any country was picked.
@@ -1429,7 +1505,8 @@ mod playable_flow_tests {
         })
         .expect("TestBackend terminal constructs");
         let mut app = fresh_app();
-        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter); // Mode → Country
+        app.handle_picker_key(KeyCode::Enter); // Country → Scenario (spinner)
         // After Enter on the Country step, the picker is on Scenario and
         // bg == ScenarioLoad. Render that frame and assert the spinner
         // widget paints *something* the user can see — one of the phase
@@ -1473,31 +1550,30 @@ mod playable_flow_tests {
 
     #[test]
     fn enter_ai_vs_ai_creates_generated_scenario_and_advances_world() {
-        // Wiring proof: selecting the sentinel country + Enter must put us
-        // into AI vs AI mode with a generated scenario and a non-zero world
-        // turn after the first tick.
+        // Wiring proof: the picker routes Mode → Country → Scenario → game,
+        // and AI vs AI mode produces a generated scenario with a non-zero
+        // world turn after the first tick.
         let mut app = fresh_app();
 
-        // Move the highlight down past the canonical 5 countries to the
-        // sentinel `__ai_vs_ai__` country at index 5.
-        for _ in 0..5 {
-            app.handle_picker_key(KeyCode::Down);
-        }
-        let sel = app.picker.selected_country();
-        assert!(sel.is_some());
-        assert!(
-            sel.unwrap().hint.starts_with("__ai_vs_ai__"),
-            "expected sentinel country, got hint={:?}",
-            sel.map(|c| c.hint.clone())
+        // 1) Mode step: switch to AI vs AI (index 1).
+        app.handle_picker_key(KeyCode::Down);
+        assert_eq!(app.picker.mode_idx, 1);
+        // Advance to Country.
+        app.handle_picker_key(KeyCode::Enter);
+        assert_eq!(app.picker.step, PickerStep::Country);
+        assert_eq!(
+            app.picker.mode,
+            crate::picker::ModeChoice::AiVsAi,
+            "Mode choice must be latched before Country shows"
         );
 
-        // Enter — should route through `enter_after_picker` and into
-        // `enter_ai_vs_ai`.
+        // 2) Country step: keep the default (US).
         app.handle_picker_key(KeyCode::Enter);
-        // The picker might still be on Scenario step — send another Enter
-        // so the second picker transition fires.
+        assert_eq!(app.picker.step, PickerStep::Scenario);
+
+        // 3) Scenario step in AI vs AI mode = theater picker. Keep the
+        // default (Baltic Sea) and advance.
         app.handle_picker_key(KeyCode::Enter);
-        // Force a render tick.
         app.bg = BgOp::Idle;
 
         // We should now be in Game, with `mode = AiVsAi` and a world.
@@ -1509,6 +1585,14 @@ mod playable_flow_tests {
         assert!(
             app.world.is_some(),
             "AI vs AI mode must produce an initial world"
+        );
+        // Scenario must be a generated one — id starts with the seed
+        // prefix the generator produces (format!("{}_gen_{:08x}", seed, seed)).
+        let scenario_id = app.scenario.as_ref().unwrap().id.clone();
+        assert!(
+            scenario_id.contains("_gen_"),
+            "AI vs AI scenario id must be a generated one, got {:?}",
+            scenario_id
         );
 
         // Step a few times by directly calling the public `step_ai_vs_ai`.
@@ -1556,11 +1640,11 @@ mod playable_flow_tests {
         // In AI vs AI mode the action menu is disabled — Enter must not
         // crash, must not double-apply a player action. Esc still exits.
         let mut app = fresh_app();
-        for _ in 0..5 {
-            app.handle_picker_key(KeyCode::Down);
-        }
-        app.handle_picker_key(KeyCode::Enter);
-        app.handle_picker_key(KeyCode::Enter);
+        // Mode → Country → Scenario (AI vs AI selected).
+        app.handle_picker_key(KeyCode::Down); // mode_idx: 1 (AI vs AI)
+        app.handle_picker_key(KeyCode::Enter); // → Country
+        app.handle_picker_key(KeyCode::Enter); // → Scenario (theaters)
+        app.handle_picker_key(KeyCode::Enter); // → Game
         app.bg = BgOp::Idle;
         assert!(app.mode.is_ai_vs_ai());
 
@@ -1576,37 +1660,37 @@ mod playable_flow_tests {
     }
 
     #[test]
-    fn sentinel_country_routes_picker_enter_to_ai_vs_ai_not_player_game() {
-        // Focused regression: the picker entry for the sentinel country
-        // must never reach `enter_game` — that path uses the scenario
-        // step and a bundled scenario JSON, neither of which apply here.
+    fn ai_vs_ai_mode_routes_to_generated_scenario_not_player_game() {
+        // Focused regression: choosing AI vs AI on the Mode step must
+        // route through `enter_ai_vs_ai_for` (corpus-generated scenario),
+        // NOT through `enter_game` (bundled JSON scenario). The two paths
+        // diverge at `enter_after_picker`; this test pins that the
+        // discriminator is `picker.mode`, not the country hint (the old
+        // sentinel-based check).
         let mut app = fresh_app();
-        for _ in 0..5 {
-            app.handle_picker_key(KeyCode::Down);
-        }
-        let sel = app.picker.selected_country().cloned();
-        assert!(
-            sel.as_ref().map(|c| c.hint.starts_with("__ai_vs_ai__")).unwrap_or(false)
-        );
-        app.handle_picker_key(KeyCode::Enter);
-        // After Enter, we should be somewhere other than "waiting in picker"
-        // — either on Game (best) or stuck on Scenario step but in AiVsAi
-        // mode. Both are acceptable; the bug we're guarding against is
-        // getting stuck with a non-AiVsAi mode.
+        // Mode: switch to AI vs AI.
+        app.handle_picker_key(KeyCode::Down);
+        app.handle_picker_key(KeyCode::Enter); // → Country
+        // Country: keep default (US).
+        app.handle_picker_key(KeyCode::Enter); // → Scenario (theaters)
+        // Scenario (theater): keep default (Baltic Sea).
+        app.handle_picker_key(KeyCode::Enter); // → Game
         app.bg = BgOp::Idle;
-        // The cheapest unambiguous invariant: scenario.id starts with
-        // the synthetic seed prefix when we ended up in Game.
-        if app.screen == Screen::Game {
-            let id = app
-                .scenario
-                .as_ref()
-                .map(|s| s.id.clone())
-                .unwrap_or_default();
-            assert!(
-                id.contains("_gen_"),
-                "sentinel country must produce a generated scenario, got id={}",
-                id
-            );
-        }
+
+        assert_eq!(app.screen, Screen::Game);
+        assert!(
+            app.mode.is_ai_vs_ai(),
+            "AI vs AI mode selection must yield AiVsAi engine mode"
+        );
+        let id = app
+            .scenario
+            .as_ref()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        assert!(
+            id.contains("_gen_"),
+            "AI vs AI must produce a corpus-generated scenario, got id={}",
+            id
+        );
     }
 }
