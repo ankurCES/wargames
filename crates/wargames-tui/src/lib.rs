@@ -15,6 +15,7 @@ pub mod llm;
 pub mod net;
 pub mod panes;
 pub mod picker;
+pub mod settings;
 pub mod splash;
 pub mod text;
 pub mod theme;

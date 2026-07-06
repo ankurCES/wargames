@@ -3,6 +3,7 @@
 //! more" hint when overflow occurs.
 
 use crate::text::{self, overflow_hint_line, wrap_to_width};
+use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -11,13 +12,14 @@ use ratatui::Frame;
 use wargames_core::log::LogEntry;
 
 pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
+    let theme = theme::current();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme.border))
         .title(Span::styled(
             " EVENT LOG ",
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.log_header)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
@@ -35,7 +37,7 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
         };
         let p = Paragraph::new(Line::from(Span::styled(
             hint,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.log_dim),
         )));
         frame.render_widget(p, inner);
         return;
@@ -44,7 +46,7 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
     if log.is_empty() {
         let p = Paragraph::new(Line::from(Span::styled(
             "  (no events yet)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.log_dim),
         )));
         frame.render_widget(p, inner);
         return;
@@ -61,13 +63,13 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
     let mut lines: Vec<Line> = Vec::new();
     for entry in log {
         let color = match entry.side.as_str() {
-            "us" => Color::Cyan,
-            "opp" => Color::LightRed,
-            _ => Color::Gray,
+            "us" => theme.log_us,
+            "opp" => theme.log_opp,
+            _ => theme.log_neutral,
         };
         let kind_color = match entry.kind.as_str() {
-            "trigger" => Color::Yellow,
-            "outcome" => Color::Magenta,
+            "trigger" => theme.log_trigger,
+            "outcome" => theme.log_outcome,
             _ => color,
         };
         let header = format!(
@@ -86,7 +88,7 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
             let mut row = lead;
             row.push(Span::styled(
                 msg_line.clone(),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.log_text),
             ));
             lines.push(Line::from(row));
         }
@@ -112,13 +114,13 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
                 Line::from(Span::styled(
                     format!("  … {count} earlier row{plu} (scroll with PgUp/PgDn)",
                         plu = if count == 1 { "" } else { "s" }),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.log_dim),
                 ))
             })
             .unwrap_or_else(|| {
                 Line::from(Span::styled(
                     "  … scroll",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme.log_dim),
                 ))
             });
         // Replace the first visible line with the hint, dropping the

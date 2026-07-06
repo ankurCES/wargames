@@ -13,6 +13,7 @@ use crate::picker::{
 };
 use crate::splash::render_splash;
 use crate::text;
+use crate::theme;
 use crate::tts::Tts;
 use crate::widget_action::{render as render_action, ALL_ACTIONS};
 use crate::widget_log::render as render_log;
@@ -38,6 +39,7 @@ pub enum Screen {
     Picker,
     Game,
     GameOver,
+    Settings,
 }
 
 /// Mode flag for the Game screen. `PlayerVsWorld` is the historical behavior;
@@ -144,6 +146,8 @@ pub struct App {
     /// to translate "rows in the visible window" into "offset rows"
     /// without re-querying ratatui.
     pub log_view_height: u16,
+    /// Settings screen state. Only meaningful when `screen == Settings`.
+    pub settings_state: Option<crate::settings::SettingsState>,
 }
 
 impl App {
@@ -152,6 +156,15 @@ impl App {
         let tts = Tts::from_settings(&settings);
         let mut action_list = ListState::default();
         action_list.select(Some(0));
+        // Resolve the boot theme from the on-disk settings file before
+        // any widget renders. Unknown slugs fall back to og_wopr so
+        // the UI never looks broken at startup.
+        let _loaded = crate::settings::load();
+        if let Some(slug) = _loaded.theme.as_deref() {
+            theme::set_current(theme::by_name(slug));
+        } else {
+            theme::set_current(theme::og_wopr());
+        }
         // Resolve relative `scenarios_dir` against the crate's manifest
         // directory so the picker always finds the bundled scenarios,
         // regardless of the process CWD. Without this, `cargo test`
@@ -197,6 +210,7 @@ impl App {
             contacts: Vec::new(),
             log_scroll: 0,
             log_view_height: 0,
+            settings_state: None,
         }
     }
 
@@ -774,6 +788,12 @@ impl App {
                 self.refresh_prediction();
                 false
             }
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                // Open the Settings screen. Theme is committed on Enter
+                // and reverted on Esc, so mid-game restarts are safe.
+                self.open_settings();
+                false
+            }
             _ => false,
         }
     }
@@ -789,6 +809,78 @@ impl App {
         let i = self.action_list.selected().unwrap_or(0);
         let prev = if i == 0 { len - 1 } else { i - 1 };
         self.action_list.select(Some(prev));
+    }
+
+    /// Open the Settings screen from the Game view.
+    ///
+    /// We initialize (or reuse) the `SettingsState` with the current
+    /// theme as its `boot_slug` baseline, then flip into Settings.
+    /// The first render of the Settings screen reflects the boot
+    /// theme; subsequent Up/Down keys live-preview new themes.
+    pub fn open_settings(&mut self) {
+        if self.settings_state.is_none() {
+            self.settings_state = Some(crate::settings::SettingsState::new());
+        }
+        self.screen = Screen::Settings;
+    }
+
+    /// Handle a keypress while `Screen::Settings` is active.
+    ///
+    /// Returns `true` only when the user wants to quit the app
+    /// outright (Ctrl+C / `q` from anywhere); Esc just closes the
+    /// screen and reverts any uncommitted theme change.
+    pub fn handle_settings_key(&mut self, code: KeyCode) -> bool {
+        // Lazy-init the state if we somehow entered Settings without
+        // going through `open_settings` (defensive — shouldn't happen
+        // but cheap to handle).
+        if self.settings_state.is_none() {
+            self.settings_state = Some(crate::settings::SettingsState::new());
+        }
+        let state = self
+            .settings_state
+            .as_mut()
+            .expect("just initialized above");
+        match code {
+            KeyCode::Esc => {
+                state.revert();
+                self.screen = Screen::Game;
+                false
+            }
+            KeyCode::Char('q') | KeyCode::Char('Q') => true,
+            KeyCode::Up => {
+                state.move_up();
+                state.apply_preview();
+                false
+            }
+            KeyCode::Down | KeyCode::Char(' ') | KeyCode::Char('j') => {
+                state.move_down();
+                state.apply_preview();
+                false
+            }
+            KeyCode::Char('k') => {
+                state.move_up();
+                state.apply_preview();
+                false
+            }
+            KeyCode::Enter => {
+                let slug = state.committed_slug();
+                match crate::settings::save(slug) {
+                    Ok(()) => {
+                        self.status =
+                            format!("settings saved: theme = {}", slug);
+                    }
+                    Err(e) => {
+                        self.status = format!(
+                            "settings save failed: {} — kept {} in memory",
+                            e, slug
+                        );
+                    }
+                }
+                self.screen = Screen::Game;
+                false
+            }
+            _ => false,
+        }
     }
 
     /// Translate a scroll key into a new `log_scroll` value. Bound to
@@ -1119,6 +1211,11 @@ impl App {
             Screen::GameOver => {
                 self.render_game_over(frame);
             }
+            Screen::Settings => {
+                if let Some(state) = self.settings_state.as_mut() {
+                    crate::settings::render(frame, frame.area(), state);
+                }
+            }
         }
     }
 
@@ -1154,7 +1251,11 @@ impl App {
                 self.status
             )
         };
-        let p = Paragraph::new(line).style(Style::default().bg(Color::Rgb(20, 20, 20)));
+        let p = Paragraph::new(line).style(
+            Style::default()
+                .bg(Color::Rgb(20, 20, 20))
+                .fg(theme::current().status_text),
+        );
         frame.render_widget(p, area);
     }
 
@@ -1166,14 +1267,14 @@ impl App {
         frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Red));
+            .border_style(Style::default().fg(theme::current().state_value_crit));
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let lines = vec![
             Line::from(Span::styled(
                 "GAME OVER",
                 Style::default()
-                    .fg(Color::Red)
+                    .fg(theme::current().state_value_crit)
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -1181,12 +1282,12 @@ impl App {
                 self.game_over_message
                     .clone()
                     .unwrap_or_else(|| "—".into()),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme::current().status_text),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "Press any key to quit.",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::current().status_dim),
             )),
         ];
         let _ = Wrap { trim: false }; // satisfy unused-import lint on no_std toolchains
@@ -1201,13 +1302,14 @@ impl App {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
         frame.render_widget(Clear, area);
+        let t = theme::current();
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
+            .border_style(Style::default().fg(t.status_warn))
             .title(Span::styled(
                 " TERMINAL TOO SMALL ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(t.status_warn)
                     .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(area);
@@ -1221,16 +1323,16 @@ impl App {
                     "current: {}×{} · minimum: {}×{}",
                     area.width, area.height, min_w, min_h
                 ),
-                Style::default().fg(Color::White),
+                Style::default().fg(t.status_text),
             )),
             Line::from(""),
             Line::from(Span::styled(
                 "enlarge the terminal (or split pane size)",
-                Style::default().fg(Color::Gray),
+                Style::default().fg(t.status_dim),
             )),
             Line::from(Span::styled(
                 "and press any key to continue.",
-                Style::default().fg(Color::Gray),
+                Style::default().fg(t.status_dim),
             )),
         ];
         let p = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -1339,18 +1441,19 @@ impl App {
         if area.width < 4 {
             return;
         }
+        let t = theme::current();
         let mut spans: Vec<Span<'static>> = Vec::new();
         for (i, kind) in PaneKind::tab_order().iter().enumerate() {
             if i > 0 && spans.len() < area.width as usize {
                 spans.push(Span::styled(
                     " │ ",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.status_dim),
                 ));
             }
             let (fg, bg, modifier) = if *kind == self.active_pane {
-                (Color::Black, Color::Yellow, Modifier::BOLD)
+                (Color::Black, t.status_warn, Modifier::BOLD)
             } else {
-                (Color::Gray, Color::Reset, Modifier::empty())
+                (t.status_dim, Color::Reset, Modifier::empty())
             };
             spans.push(Span::styled(
                 format!(" {} ", kind.label()),
@@ -1362,7 +1465,7 @@ impl App {
         if used + 14 <= area.width as usize {
             spans.push(Span::styled(
                 " Tab to switch",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.status_dim),
             ));
         }
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -2354,5 +2457,69 @@ mod playable_flow_tests {
             app.log_scroll, 0,
             "every world mutation must snap the log back to the tail"
         );
+    }
+
+    /// Pressing `s` from the Game screen opens Settings; pressing
+    /// `Esc` from Settings returns to Game. This is the keyboard
+    /// contract the picker-bypass route relies on — without it, the
+    /// only path into Settings would be `Esc → Picker → re-enter Game`.
+    #[test]
+    fn s_opens_settings_and_esc_returns_to_game() {
+        let mut app = fresh_app();
+        // Drop into the Game screen directly — bypassing the picker
+        // keeps the test focused on the open/close transitions, not
+        // on scenario resolution.
+        app.screen = Screen::Game;
+        assert_eq!(app.screen, Screen::Game);
+        // `s` from Game → Settings.
+        let quit = app.handle_game_key(KeyCode::Char('s'));
+        assert!(!quit, "open settings must not quit");
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(
+            app.settings_state.is_some(),
+            "open_settings must materialize the SettingsState"
+        );
+        // `Esc` from Settings → Game (no commit, no theme change).
+        let quit = app.handle_settings_key(KeyCode::Esc);
+        assert!(!quit, "esc must not quit");
+        assert_eq!(app.screen, Screen::Game);
+    }
+
+    /// Up/Down inside Settings live-preview the new theme — but
+    /// Esc reverts it. Verify the boot theme survives a navigated
+    /// Settings session followed by Esc.
+    #[test]
+    fn settings_navigate_then_esc_reverts_theme() {
+        let mut app = fresh_app();
+        let boot = crate::theme::current();
+        app.screen = Screen::Game;
+        app.open_settings();
+        // Down at least once — moves the highlight and live-previews
+        // whichever theme is one row below the boot.
+        app.handle_settings_key(KeyCode::Down);
+        // Esc — must roll back to boot.
+        app.handle_settings_key(KeyCode::Esc);
+        let after = crate::theme::current();
+        assert_eq!(
+            after.name, boot.name,
+            "Esc must restore the theme that was active when Settings opened"
+        );
+        assert_eq!(app.screen, Screen::Game);
+    }
+
+    /// `q` / `Q` from Settings must request quit (the run loop
+    /// treats a `true` return as ExitCode::SUCCESS). Esc must NOT
+    /// quit — it just closes the screen.
+    #[test]
+    fn settings_q_quits_but_esc_closes_only() {
+        let mut app = fresh_app();
+        app.screen = Screen::Game;
+        app.open_settings();
+        assert!(app.handle_settings_key(KeyCode::Esc) == false);
+        assert_eq!(app.screen, Screen::Game);
+        // Reopen and try `q`.
+        app.open_settings();
+        assert!(app.handle_settings_key(KeyCode::Char('q')));
+        assert_eq!(app.screen, Screen::Settings);
     }
 }

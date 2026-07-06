@@ -4,8 +4,13 @@
 //! fixed-width layout in the body — at 24 cols the line for "US
 //! routine $50 C 3 S 2" still fits on a single row, at 12 cols it
 //! collapses to its essential information (the posture names).
+//!
+//! Colour comes from `crate::theme::current()`. The DEFCON ladder
+//! maps to the three `state_value_*` roles (ok → warn → crit) and a
+//! fallback "off the chart" magenta inherited from the seed themes.
 
 use crate::text::{self, pad_right, wrap_to_width};
+use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -14,23 +19,24 @@ use ratatui::Frame;
 use wargames_core::{Side, WorldState};
 
 pub fn render(frame: &mut Frame, area: Rect, state: &WorldState) {
+    let theme = theme::current();
     let defcon_color = match state.defcon {
-        5 => Color::Green,
-        4 => Color::Yellow,
-        3 => Color::LightYellow,
-        2 => Color::LightRed,
-        1 => Color::Red,
-        _ => Color::Magenta,
+        5 => theme.state_value_ok,
+        4 => theme.state_value_warn,
+        3 => theme.predict_bar_mid, // a "yellow-ish" mid tier — themes map this to LightYellow
+        2 => theme.log_trigger,    // light-red/upcoming-warning
+        1 => theme.state_value_crit,
+        _ => theme.splash_accent,  // off the chart — magenta-ish
     };
     let title = Span::styled(
         " STATE ",
         Style::default()
-            .fg(Color::Green)
+            .fg(theme.title)
             .add_modifier(Modifier::BOLD),
     );
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme.border))
         .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -72,32 +78,32 @@ pub fn render(frame: &mut Frame, area: Rect, state: &WorldState) {
 
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
-            Span::styled("DEFCON ", Style::default().fg(Color::Gray)),
+            Span::styled("DEFCON ", Style::default().fg(theme.state_dim)),
             Span::styled(
                 format!("{}", state.defcon),
                 Style::default().fg(defcon_color).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   TURN ", Style::default().fg(Color::Gray)),
+            Span::styled("   TURN ", Style::default().fg(theme.state_dim)),
             Span::styled(
                 format!("{}", state.turn),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.state_text).add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from({
-            let mut v = vec![Span::styled("TENSION ", Style::default().fg(Color::Gray))];
-            v.extend(bar(state.tension as u16, Color::Yellow, bar_w));
+            let mut v = vec![Span::styled("TENSION ", Style::default().fg(theme.state_dim))];
+            v.extend(bar(state.tension as u16, theme.predict_bar_mid, bar_w));
             v.push(Span::styled(
                 format!(" {:>3.0}", state.tension),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.state_text),
             ));
             v
         }),
         Line::from({
-            let mut v = vec![Span::styled("DETECT  ", Style::default().fg(Color::Gray))];
-            v.extend(bar(state.detection_pct as u16, Color::Cyan, detect_w));
+            let mut v = vec![Span::styled("DETECT  ", Style::default().fg(theme.state_dim))];
+            v.extend(bar(state.detection_pct as u16, theme.radar_us, detect_w));
             v.push(Span::styled(
                 format!(" {:>3.0}", state.detection_pct),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.state_text),
             ));
             v
         }),
@@ -107,27 +113,28 @@ pub fn render(frame: &mut Frame, area: Rect, state: &WorldState) {
     for (i, l) in us_lines.iter().enumerate() {
         if i == 0 {
             lines.push(Line::from(vec![
-                Span::styled("US   ", Style::default().fg(Color::Cyan)),
-                Span::styled(l.clone(), Style::default().fg(Color::White)),
+                Span::styled("US   ", Style::default().fg(theme.state_us)),
+                Span::styled(l.clone(), Style::default().fg(theme.state_text)),
             ]));
         } else {
             // Continuation rows stay indented under "US".
             lines.push(Line::from(vec![
-                Span::styled("     ", Style::default().fg(Color::DarkGray)),
-                Span::styled(l.clone(), Style::default().fg(Color::White)),
+                Span::styled("     ", Style::default().fg(theme.state_dim)),
+                Span::styled(l.clone(), Style::default().fg(theme.state_text)),
             ]));
         }
     }
     for (i, l) in opp_lines.iter().enumerate() {
         if i == 0 {
             lines.push(Line::from(vec![
-                Span::styled("OPP  ", Style::default().fg(Color::LightRed)),
-                Span::styled(l.clone(), Style::default().fg(Color::White)),
+                Span::styled("OPP  ", Style::default().fg(theme.state_opp)),
+                Span::styled(l.clone(), Style::default().fg(theme.state_text)),
             ]));
         } else {
+            // Continuation rows stay indented under "OPP".
             lines.push(Line::from(vec![
-                Span::styled("     ", Style::default().fg(Color::DarkGray)),
-                Span::styled(l.clone(), Style::default().fg(Color::White)),
+                Span::styled("     ", Style::default().fg(theme.state_dim)),
+                Span::styled(l.clone(), Style::default().fg(theme.state_text)),
             ]));
         }
     }
@@ -135,7 +142,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &WorldState) {
     for l in theatre_lines {
         lines.push(Line::from(Span::styled(
             l,
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.state_dim),
         )));
     }
 
@@ -148,6 +155,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &WorldState) {
 }
 
 fn bar(pct: u16, color: Color, width: usize) -> Vec<Span<'static>> {
+    let theme = theme::current();
     let width = width.max(1);
     let filled = ((pct.min(100) as usize) * width) / 100;
     let mut s = String::new();
@@ -160,7 +168,7 @@ fn bar(pct: u16, color: Color, width: usize) -> Vec<Span<'static>> {
     if pad > 0 {
         out.push(Span::styled(
             "▁".repeat(pad),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.state_dim),
         ));
     }
     out

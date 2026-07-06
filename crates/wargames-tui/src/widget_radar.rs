@@ -7,6 +7,7 @@
 //! screen between opponent tool calls.
 
 use crate::text::truncate_with_ellipsis;
+use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -37,10 +38,12 @@ pub enum ContactSide {
 
 impl ContactSide {
     fn color(self) -> Color {
+        let theme = theme::current();
         match self {
-            ContactSide::Us | ContactSide::Nato => Color::Cyan,
-            ContactSide::Soviet => Color::LightRed,
-            ContactSide::Neutral => Color::Yellow,
+            ContactSide::Us => theme.radar_us,
+            ContactSide::Nato => theme.radar_nato,
+            ContactSide::Soviet => theme.radar_soviet,
+            ContactSide::Neutral => theme.radar_neutral,
         }
     }
 }
@@ -59,13 +62,14 @@ const MIN_WIDTH_FOR_FULL: u16 = 60;
 /// (the pane shows a friendly empty state). `scenario_title` is the
 /// theatre line printed above the contacts; can be left blank.
 pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_title: &str) {
+    let theme = theme::current();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme.border))
         .title(Span::styled(
             " RADAR / CONTACTS ",
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.title)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
@@ -78,12 +82,12 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
     if inner.width >= MIN_WIDTH_FOR_FULL {
         lines.push(Line::from(Span::styled(
             "  ID    HULL       FACTION  SPD",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.radar_ghost),
         )));
     } else if inner.width >= 28 {
         lines.push(Line::from(Span::styled(
             "  ID    HULL       SPD",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.radar_ghost),
         )));
     } else {
         // Skip the header — it would be wider than the rows; just
@@ -94,7 +98,7 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
         let theatre = format!("  theater: {}", scenario_title);
         lines.push(Line::from(Span::styled(
             truncate_with_ellipsis(&theatre, inner_w),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme.radar_ghost),
         )));
         lines.push(Line::from(Span::raw("")));
     }
@@ -102,7 +106,7 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
     if contacts.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no live contacts — next turn)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.radar_ghost),
         )));
     } else {
         for c in contacts.iter() {
@@ -129,7 +133,7 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
             let row = if faction_w > 0 {
                 let faction_str = truncate_with_ellipsis(c.side.label(), faction_w);
                 vec![
-                    Span::styled(id, Style::default().fg(Color::Gray)),
+                    Span::styled(id, Style::default().fg(theme.radar_ghost)),
                     Span::styled(
                         format!("{:<hull_w$} ", hull, hull_w = hull_w),
                         Style::default().fg(c.side.color()),
@@ -138,16 +142,16 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
                         format!("{:<faction_w$} ", faction_str, faction_w = faction_w),
                         Style::default().fg(c.side.color()).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(format!("{}kn", c.speed_kn), Style::default().fg(Color::White)),
+                    Span::styled(format!("{}kn", c.speed_kn), Style::default().fg(theme.radar_ghost)),
                 ]
             } else {
                 vec![
-                    Span::styled(id, Style::default().fg(Color::Gray)),
+                    Span::styled(id, Style::default().fg(theme.radar_ghost)),
                     Span::styled(
                         format!("{:<hull_w$} ", hull, hull_w = hull_w),
                         Style::default().fg(c.side.color()),
                     ),
-                    Span::styled(format!("{}kn", c.speed_kn), Style::default().fg(Color::White)),
+                    Span::styled(format!("{}kn", c.speed_kn), Style::default().fg(theme.radar_ghost)),
                 ]
             };
             lines.push(Line::from(row));

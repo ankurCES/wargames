@@ -12,6 +12,7 @@
 //! Each step requires an explicit `Enter` before the picker advances. There
 //! is no auto-pick anywhere in the flow.
 
+use crate::theme;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -389,11 +390,11 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme::current().border))
         .title(Span::styled(
             format!(" {title} "),
             Style::default()
-                .fg(Color::Green)
+                .fg(theme::current().picker_title)
                 .add_modifier(Modifier::BOLD),
         ));
     frame.render_widget(block, chunks[0]);
@@ -404,7 +405,7 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
     if let Some(msg) = picker.error.as_ref() {
         let p = Paragraph::new(Line::from(Span::styled(
             format!("  {msg}"),
-            Style::default().fg(Color::LightRed).add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme::current().status_warn).add_modifier(Modifier::ITALIC),
         )))
         .wrap(Wrap { trim: false });
         frame.render_widget(p, chunks[1]);
@@ -436,11 +437,11 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
                 spans.push(Line::from(vec![
                     Span::styled(
                         title,
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme::current().picker_label).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         body_lines.first().cloned().unwrap_or_default(),
-                        Style::default().fg(Color::Gray),
+                        Style::default().fg(theme::current().picker_dim),
                     ),
                 ]));
                 for extra in body_lines.iter().skip(1) {
@@ -448,7 +449,7 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
                     let indent = " ".repeat(title_col + 2);
                     spans.push(Line::from(Span::styled(
                         format!("{indent}{extra}"),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::current().picker_dim),
                     )));
                 }
                 ListItem::new(spans)
@@ -466,18 +467,18 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
                 spans.push(Line::from(vec![
                     Span::styled(
                         title,
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme::current().picker_label).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
                         body_lines.first().cloned().unwrap_or_default(),
-                        Style::default().fg(Color::Gray),
+                        Style::default().fg(theme::current().picker_dim),
                     ),
                 ]));
                 for extra in body_lines.iter().skip(1) {
                     let indent = " ".repeat(title_col);
                     spans.push(Line::from(Span::styled(
                         format!("{indent}{extra}"),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(theme::current().picker_dim),
                     )));
                 }
                 ListItem::new(spans)
@@ -490,15 +491,15 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             format!("  DEFCON {}  ", s.defcon),
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                            Style::default().fg(theme::current().status_warn).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!("{:<22}", s.title),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(theme::current().picker_dim),
                         ),
                         Span::styled(
                             format!("[{}]", s.theater),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(theme::current().picker_dim),
                         ),
                     ]))
                 })
@@ -509,11 +510,11 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             format!("  {:<22}", t.theater.display_name()),
-                            Style::default().fg(Color::White),
+                            Style::default().fg(theme::current().picker_dim),
                         ),
                         Span::styled(
                             format!("[seed 0x{:08x}]", t.seed),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(theme::current().picker_dim),
                         ),
                     ]))
                 })
@@ -524,8 +525,8 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(52, 0, 0))
-                .fg(Color::White)
+                .bg(theme::current().action_highlight_bg)
+                .fg(theme::current().action_highlight_fg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
@@ -561,7 +562,7 @@ pub fn render_picker_status(frame: &mut Frame, area: Rect, picker: &Picker, over
             },
         }
     };
-    let p = Paragraph::new(body).style(Style::default().bg(Color::Rgb(20, 20, 20)));
+    let p = Paragraph::new(body).style(Style::default().bg(Color::Rgb(20, 20, 20)).fg(theme::current().status_text));
     frame.render_widget(p, area);
 }
 

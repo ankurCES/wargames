@@ -5,6 +5,7 @@
 //! truncation noise — the verb name already carries the meaning).
 
 use crate::text::truncate_with_ellipsis;
+use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -68,23 +69,20 @@ pub fn desired_inner_width() -> u16 {
 }
 
 pub fn render(frame: &mut Frame, area: Rect, list_state: &mut ListState) {
+    let theme = theme::current();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme.border))
         .title(Span::styled(
             " ACTION ",
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.title)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let inner_w = inner.width as usize;
-    // The bullet + 1-space gap reserves 3 cells (`> ` prefix from the
-    // highlight symbol plus our own leading "  "); then the action name
-    // in a fixed 8-cell column so the list stays visually aligned
-    // even when the description wraps over multiple terminal widths.
     let name_w = 8usize;
     let needs_descr_min = (inner.width as u16) >= DESCRIPTION_MIN_WIDTH;
 
@@ -93,24 +91,22 @@ pub fn render(frame: &mut Frame, area: Rect, list_state: &mut ListState) {
         .map(|a| {
             let name = truncate_with_ellipsis(a.as_str(), name_w);
             let line = if needs_descr_min {
-                // Show both name and description.
                 let desc_w = inner_w.saturating_sub(name_w + 3).max(6);
                 let desc = truncate_with_ellipsis(&a.display(), desc_w);
                 Line::from(vec![
                     Span::styled(
                         format!("  {:<width$}", name, width = name_w),
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(theme.action_label)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(desc, Style::default().fg(Color::Gray)),
+                    Span::styled(desc, Style::default().fg(theme.action_dim)),
                 ])
             } else {
-                // Narrow — verb only.
                 Line::from(Span::styled(
                     format!("  {}", name),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme.action_label)
                         .add_modifier(Modifier::BOLD),
                 ))
             };
@@ -120,8 +116,8 @@ pub fn render(frame: &mut Frame, area: Rect, list_state: &mut ListState) {
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(52, 0, 0))
-                .fg(Color::White)
+                .bg(theme.action_highlight_bg)
+                .fg(theme.action_highlight_fg)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");

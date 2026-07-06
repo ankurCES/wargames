@@ -10,6 +10,7 @@ mod llm;
 mod net;
 mod panes;
 mod picker;
+mod settings;
 mod splash;
 mod text;
 mod theme;
@@ -274,6 +275,7 @@ let rt = Runtime::new().expect("tokio runtime");
                 let quit = match app.screen {
                     Screen::Picker => app.handle_picker_key(code),
                     Screen::Game => app.handle_game_key(code),
+                    Screen::Settings => app.handle_settings_key(code),
                     Screen::Splash => {
                         app.skip_splash();
                         false

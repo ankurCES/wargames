@@ -26,6 +26,15 @@
 
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
+use std::sync::{Mutex, OnceLock};
+
+/// Process-wide handle to the active theme. Initialized lazily on
+/// first access; both `current()` and `set_current()` use this same
+/// slot so reads observe writes.
+fn slot() -> &'static Mutex<Theme> {
+    static SLOT: OnceLock<Mutex<Theme>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(og_wopr()))
+}
 
 /// One complete palette. Fields are public so callers can read them
 /// directly; widgets construct `Span::styled(text, Style::default().fg(theme.log_us))`.
@@ -234,12 +243,46 @@ pub fn seeds_slice() -> &'static [Theme] {
 /// Resolve a theme by name. Falls back to `og_wopr` so an unknown
 /// theme slug in settings.json never breaks the UI.
 pub fn by_name(slug: &str) -> Theme {
+    by_name_lookup(slug).unwrap_or_else(|| og_wopr())
+}
+
+/// Look up a theme by slug without a fallback. Returns `None` if the
+/// slug is not one of the seeded themes. Useful for callers that want
+/// to decide for themselves what to do with an unknown slug (e.g.
+/// silently keep the boot theme instead of swapping to `og_wopr`).
+pub fn by_name_lookup(slug: &str) -> Option<Theme> {
     for t in seeds_slice() {
         if t.name == slug {
-            return t.clone();
+            return Some(t.clone());
         }
     }
-    og_wopr()
+    None
+}
+
+/// The theme the renderer is currently using. Initialized to
+/// [`og_wopr`] on first access. Widgets read this via [`current`]
+/// instead of taking `&Theme` as a parameter, which keeps the
+/// hundreds of paint sites untouched while still letting the
+/// Settings tab swap palettes live.
+///
+/// Implementation: `Theme` is `Copy`, so `current()` returns by
+/// value and callers pick what they need (e.g. `theme.border`).
+/// Storing the returned `Theme` past a paint is fine — it's just
+/// ~40 bytes of `Color` (also `Copy`). The runtime store is a
+/// `Mutex<Theme>` to allow reads + writes from the single render
+/// thread without `unsafe` and without a `'static`-lifetime dance.
+pub fn current() -> Theme {
+    *slot().lock().expect("theme mutex poisoned")
+}
+
+/// Replace the active theme. Idempotent — assigning the same value
+/// is a no-op so live-preview key spam doesn't churn anything.
+pub fn set_current(theme: Theme) {
+    let mut guard = slot().lock().expect("theme mutex poisoned");
+    if guard.name == theme.name {
+        return;
+    }
+    *guard = theme;
 }
 
 /// The legacy palette. Every value here is the colour the corresponding
@@ -785,5 +828,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn current_defaults_to_og_wopr() {
+        // Always reset at the start of this test in case another test
+        // in the same process swapped the global theme.
+        set_current(og_wopr());
+        assert_eq!(current().name, og_wopr().name);
+    }
+
+    #[test]
+    fn set_current_swaps_then_resets() {
+        // Begin at known state.
+        set_current(og_wopr());
+        assert_eq!(current().name, "og-wopr");
+
+        set_current(seeds()[2].clone());
+        assert_eq!(current().name, seeds()[2].name);
+
+        // Same-assignment is a no-op (kept idempotent so live-preview
+        // doesn't churn the lock).
+        set_current(seeds()[2].clone());
+        assert_eq!(current().name, seeds()[2].name);
+
+        // Restore so other tests (and the bin flow) see og_wopr by
+        // default.
+        set_current(og_wopr());
+        assert_eq!(current().name, "og-wopr");
     }
 }

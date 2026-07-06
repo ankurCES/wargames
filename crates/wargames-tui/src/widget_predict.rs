@@ -4,6 +4,7 @@
 //! they share the row with. No fixed widths anywhere — the widget fits
 //! narrow (≤30 col) panes and breathes on wide ones.
 
+use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -17,13 +18,14 @@ use wargames_core::Prediction;
 const PERCENT_COLS: usize = 6;
 
 pub fn render(frame: &mut Frame, area: Rect, pred: Option<Prediction>) {
+    let theme = theme::current();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(theme.border))
         .title(Span::styled(
             " PREDICTIONS (Monte Carlo, 1000 sims × 5 turns) ",
             Style::default()
-                .fg(Color::Green)
+                .fg(theme.title)
                 .add_modifier(Modifier::BOLD),
         ));
     let inner = block.inner(area);
@@ -36,42 +38,42 @@ pub fn render(frame: &mut Frame, area: Rect, pred: Option<Prediction>) {
                     "horizon Δdefcon {:+.2}    Δtension {:+.1}",
                     p.expected_defcon_delta, p.expected_tension_delta
                 ),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.predict_label),
             )),
             Line::from(Span::raw("")),
             labeled_bar(
                 "STRIKE  ",
                 p.p_strike,
-                Color::Red,
+                theme.predict_bar_high,
                 bar_width_for(inner.width, "STRIKE  "),
             ),
             labeled_bar(
                 "DISARM  ",
                 p.p_disarm,
-                Color::Green,
+                theme.predict_bar_low,
                 bar_width_for(inner.width, "DISARM  "),
             ),
             labeled_bar(
                 "DEFECT  ",
                 p.p_defect,
-                Color::Magenta,
+                theme.log_outcome,
                 bar_width_for(inner.width, "DEFECT  "),
             ),
             labeled_bar(
                 "NEGOT   ",
                 p.p_negotiate,
-                Color::Cyan,
+                theme.predict_label,
                 bar_width_for(inner.width, "NEGOT   "),
             ),
             Line::from(Span::raw("")),
             Line::from(Span::styled(
                 "(bars are probability of each terminal within 5 turns)",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.predict_label),
             )),
         ],
         None => vec![Line::from(Span::styled(
             "(computing first prediction…)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.predict_label),
         ))],
     };
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
@@ -89,6 +91,7 @@ fn bar_width_for(inner_width: u16, label: &str) -> usize {
 }
 
 fn labeled_bar(label: &'static str, prob: f32, color: Color, width: usize) -> Line<'static> {
+    let theme = theme::current();
     let filled = ((prob.clamp(0.0, 1.0) * width as f32) as usize).min(width);
     let mut s = String::new();
     for _ in 0..filled {
@@ -99,12 +102,12 @@ fn labeled_bar(label: &'static str, prob: f32, color: Color, width: usize) -> Li
         pad.push('░');
     }
     Line::from(vec![
-        Span::styled(label, Style::default().fg(Color::Gray)),
+        Span::styled(label, Style::default().fg(theme.predict_label)),
         Span::styled(s, Style::default().fg(color)),
-        Span::styled(pad, Style::default().fg(Color::DarkGray)),
+        Span::styled(pad, Style::default().fg(theme.predict_label)),
         Span::styled(
             format!(" {:>3}%", (prob * 100.0).round() as u32),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme.predict_text),
         ),
     ])
 }

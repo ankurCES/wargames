@@ -21,6 +21,7 @@
 //! the box to a corner of the frame; the caller passes the desired
 //! rectangle so the widget itself stays layout-agnostic.
 
+use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -151,9 +152,10 @@ pub fn render(
         height: h,
     };
     frame.render_widget(Clear, box_area);
+    let theme = theme::current();
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
+        .border_style(Style::default().fg(theme.status_warn));
     let inner = block.inner(box_area);
     frame.render_widget(block, box_area);
 
@@ -176,35 +178,35 @@ pub fn render(
         Span::styled(
             glyph.to_string(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.status_warn)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" {top_text}"), Style::default().fg(Color::White)),
+        Span::styled(format!(" {top_text}"), Style::default().fg(theme.status_text)),
     ]);
 
     // --- Middle line: progress bar + percent -----------------------------
-    // Fill cells in `Color::Yellow`, remaining in `Color::DarkGray`. The
-    // bar sits flush-left, percent sits flush-right inside the box.
+    // Fill cells in the warn colour, remaining in dim. The bar sits
+    // flush-left, percent sits flush-right inside the box.
     let mut bar_spans: Vec<Span<'static>> = Vec::with_capacity(BAR_WIDTH + 4);
     for i in 0..BAR_WIDTH {
         let c = if i < fill { FILL_CHAR } else { TRACK_CHAR };
         let color = if i < fill {
-            Color::Yellow
+            theme.status_warn
         } else {
-            Color::DarkGray
+            theme.status_dim
         };
         bar_spans.push(Span::styled(c.to_string(), Style::default().fg(color)));
     }
     bar_spans.push(Span::styled(
         format!(" {pct:>3}%"),
-        Style::default().fg(Color::White),
+        Style::default().fg(theme.status_text),
     ));
     let bar_line = Line::from(bar_spans);
 
     // --- Bottom line: elapsed time ---------------------------------------
     let bot_line = Line::from(Span::styled(
         elapsed_str,
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme.status_dim),
     ));
 
     let lines = vec![top_line, bar_line, bot_line];
