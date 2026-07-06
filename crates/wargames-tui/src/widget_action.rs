@@ -28,7 +28,44 @@ pub const ALL_ACTIONS: [Action; 11] = [
 
 /// Below this width we render only the action name; the description
 /// ("mobilize ground forces") is dropped to avoid a wall of ellipses.
-const DESCRIPTION_MIN_WIDTH: u16 = 18;
+pub const DESCRIPTION_MIN_WIDTH: u16 = 18;
+
+/// Fallback action-panel inner width on extremely narrow terminals.
+/// The fixed action list has a longest row of ~38 cells; on a
+/// sub-50-col frame the layouts degrade gracefully and use this floor.
+pub const ACTION_PANEL_MIN_INNER_WIDTH: u16 = 14;
+
+/// Width (in cells) needed to render the longest action row without
+/// truncation, given the current "leading 2 spaces + name + 1 space +
+/// description" layout. The panes layout uses this to size the right
+/// column so the action list is always fully legible.
+pub fn widest_row_width() -> u16 {
+    // The list is static (we export the const array above), so the
+    // longest row can be computed at compile time by walking the same
+    // 11 actions and taking the max of the per-row display width.
+    let longest_name = ALL_ACTIONS
+        .iter()
+        .map(|a| crate::text::display_width(a.as_str()))
+        .max()
+        .unwrap_or(8);
+    let longest_desc = ALL_ACTIONS
+        .iter()
+        .map(|a| crate::text::display_width(a.display()))
+        .max()
+        .unwrap_or(0);
+    // Layout reserves: 2 indent + name_left_aligned(8) + 1 space + desc.
+    // The name column has a fixed width of 8 inside the widget so the
+    // names line up; descriptions keep their natural length.
+    let w = 2 + longest_name.max(8) + 1 + longest_desc;
+    w as u16
+}
+
+/// Inner width the action panel should occupy — never less than the
+/// floor, never more than the widest content. The panes layout asks
+/// for `widest_row_width()` and caps by its available column budget.
+pub fn desired_inner_width() -> u16 {
+    widest_row_width().max(ACTION_PANEL_MIN_INNER_WIDTH)
+}
 
 pub fn render(frame: &mut Frame, area: Rect, list_state: &mut ListState) {
     let block = Block::default()
@@ -45,16 +82,18 @@ pub fn render(frame: &mut Frame, area: Rect, list_state: &mut ListState) {
 
     let inner_w = inner.width as usize;
     // The bullet + 1-space gap reserves 3 cells (`> ` prefix from the
-    // highlight symbol plus our own leading "  "); then the action name.
-    let name_w = inner_w.saturating_sub(3).max(6);
+    // highlight symbol plus our own leading "  "); then the action name
+    // in a fixed 8-cell column so the list stays visually aligned
+    // even when the description wraps over multiple terminal widths.
+    let name_w = 8usize;
+    let needs_descr_min = (inner.width as u16) >= DESCRIPTION_MIN_WIDTH;
 
     let items: Vec<ListItem> = ALL_ACTIONS
         .iter()
         .map(|a| {
             let name = truncate_with_ellipsis(a.as_str(), name_w);
-            let line = if (inner.width as u16) >= DESCRIPTION_MIN_WIDTH {
-                // Show both name and description (description fits after
-                // we trim the name to leave at least 6 cells for it).
+            let line = if needs_descr_min {
+                // Show both name and description.
                 let desc_w = inner_w.saturating_sub(name_w + 3).max(6);
                 let desc = truncate_with_ellipsis(&a.display(), desc_w);
                 Line::from(vec![
@@ -135,5 +174,42 @@ mod tests {
         terminal
             .draw(|f| render(f, f.area(), &mut list_state))
             .expect("typical-width action render must not panic");
+    }
+
+    /// Every action in the catalogue must fit inside `widest_row_width`
+    /// without truncation — that's the contract the side-panel layout
+    /// depends on. If `ALL_ACTIONS` ever gains a longer verb, the
+    /// assertion will pin it down at compile-test time.
+    #[test]
+    fn every_action_fits_in_widest_row_width() {
+        use crate::text::truncate_with_ellipsis;
+        let budget = widest_row_width() as usize;
+        for a in ALL_ACTIONS.iter() {
+            // The panel renders `  <name 8> <description>` (see
+            // `widget_action::render`). Compose the same string and
+            // assert its display width fits the budget.
+            let row = format!("  {:<8} {}", a.as_str(), a.display());
+            assert!(
+                crate::text::display_width(&row) <= budget,
+                "row {:?} ({} cells) overflows widest_row_width ({})",
+                a,
+                crate::text::display_width(&row),
+                budget
+            );
+            // Sanity: truncate_with_ellipsis at the budget must not
+            // elide any non-space character of the description.
+            let kept = truncate_with_ellipsis(&row, budget);
+            assert!(crate::text::display_width(&kept) <= budget);
+        }
+    }
+
+    #[test]
+    fn widest_row_width_is_at_least_min_inner_width() {
+        assert!(
+            widest_row_width() >= ACTION_PANEL_MIN_INNER_WIDTH,
+            "widest_row_width ({}) must be at least ACTION_PANEL_MIN_INNER_WIDTH ({})",
+            widest_row_width(),
+            ACTION_PANEL_MIN_INNER_WIDTH
+        );
     }
 }

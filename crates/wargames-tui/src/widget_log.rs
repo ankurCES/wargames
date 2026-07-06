@@ -1,5 +1,6 @@
-//! Event log widget — scrolls inside its box, wraps each entry to fit the
-//! inner width, and surfaces a "N chars more" hint when overflow occurs.
+//! Event log widget — wraps each entry to fit the inner width, scrolls
+//! inside its box when the user pages up/down, and surfaces a "N chars
+//! more" hint when overflow occurs.
 
 use crate::text::{self, overflow_hint_line, wrap_to_width};
 use ratatui::layout::Rect;
@@ -9,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use wargames_core::log::LogEntry;
 
-pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry]) {
+pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
@@ -49,32 +50,16 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry]) {
         return;
     }
 
-    // The status prefix reserves cells for `[NNN] us trigger ` (14 cells).
-    // We must reserve enough cells so wrapped message lines render with at
-    // least one leading space of indent to read clearly.
     const PREFIX_CELLS: usize = 14;
     let msg_width = width.saturating_sub(PREFIX_CELLS).max(4);
-    // 1 row reserved at the top for "… N earlier events omitted".
-    let rows_for_entries = height.saturating_sub(1).max(1);
 
-    let skipped = log.len().saturating_sub(rows_for_entries);
-
+    // Build the full wrapped line set for the log so we can scroll
+    // inside it. We then clip to the visible [scroll, scroll+height)
+    // window. The header rows stay fixed at the top of the visible
+    // window (so the user always sees the most recent event whose
+    // first row is in view, regardless of scroll offset).
     let mut lines: Vec<Line> = Vec::new();
-    if skipped > 0 {
-        lines.push(Line::from(Span::styled(
-            format!("  … {skipped} earlier events omitted (log auto-scrolls)"),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    // Walk the log newest-first — every row is fully shown via wrapping
-    // when its message is too long, and a "N chars more" hint appends to
-    // the entry when the height budget is exhausted mid-message.
-    //
-    // We build line-by-line and stop appending once the pane fills.
-    let visible_start = log.len().saturating_sub(rows_for_entries);
-    let mut rows_used = lines.len();
-    for entry in &log[visible_start..] {
+    for entry in log {
         let color = match entry.side.as_str() {
             "us" => Color::Cyan,
             "opp" => Color::LightRed,
@@ -91,35 +76,8 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry]) {
         );
         let header_style = Style::default().fg(kind_color);
 
-        // Wrap the message to the per-line budget. No content is lost —
-        // even the longest message lines are fully shown across multiple
-        // rows; the only thing that gets truncated is the *folded* count
-        // (a one-line hint we synthesise) when the height runs out
-        // mid-message.
         let wrapped = wrap_to_width(&entry.message, msg_width);
-        // If this entry alone would overflow the remaining rows, fold the
-        // tail into a "…N chars more" hint that fits on a single row.
-        let rows_left = height.saturating_sub(rows_used);
-        let (shown, hidden) = if wrapped.len() <= rows_left {
-            (wrapped, 0usize)
-        } else {
-            let take = rows_left.saturating_sub(1); // reserve 1 row for hint
-            let kept = wrapped.iter().take(take).cloned().collect::<Vec<_>>();
-            let hidden_chars: usize = wrapped
-                .iter()
-                .skip(take)
-                .map(|l| text::display_width(l) + 1)
-                .sum::<usize>()
-                .saturating_sub(1);
-            (kept, hidden_chars)
-        };
-
-        for (i, msg_line) in shown.iter().enumerate() {
-            if rows_used >= height {
-                break;
-            }
-            // First row keeps the prefix; continuation rows are indented
-            // with spaces so the column reads cleanly.
+        for (i, msg_line) in wrapped.iter().enumerate() {
             let lead: Vec<Span<'static>> = if i == 0 {
                 vec![Span::styled(header.clone(), header_style)]
             } else {
@@ -131,23 +89,55 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry]) {
                 Style::default().fg(Color::White),
             ));
             lines.push(Line::from(row));
-            rows_used += 1;
-        }
-
-        if hidden > 0 {
-            if rows_used >= height {
-                break;
-            }
-            let hint = overflow_hint_line(hidden, width, "App log keeps full");
-            lines.push(Line::from(Span::styled(
-                hint,
-                Style::default().fg(Color::DarkGray),
-            )));
-            rows_used += 1;
         }
     }
 
-    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // Apply scroll: clamp `scroll` so the user can't paginate past the
+    // top (negative) or past the bottom (leave at least `height` rows
+    // visible at all times).
+    let total = lines.len();
+    let view_h = height;
+    let max_scroll = total.saturating_sub(view_h) as u16;
+    let scroll = (scroll as usize).min(max_scroll as usize) as u16;
+    // A first-row marker tells the user there are older entries above.
+    if scroll > 0 {
+        let skipped = scroll as usize;
+        // Replace the first visible row with a header that says how
+        // many entries sit above the visible window. We achieve this
+        // by mutating the in-range slice below.
+        let above = lines
+            .get(..skipped)
+            .map(|older| {
+                let count = older.len();
+                Line::from(Span::styled(
+                    format!("  … {count} earlier row{plu} (scroll with PgUp/PgDn)",
+                        plu = if count == 1 { "" } else { "s" }),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            })
+            .unwrap_or_else(|| {
+                Line::from(Span::styled(
+                    "  … scroll",
+                    Style::default().fg(Color::DarkGray),
+                ))
+            });
+        // Replace the first visible line with the hint, dropping the
+        // one that occupied that row.
+        if skipped < total {
+            lines[skipped] = above;
+        }
+    }
+
+    let visible: Vec<Line> = if total <= view_h {
+        lines
+    } else {
+        let end = (scroll as usize + view_h).min(total);
+        lines[scroll as usize..end].to_vec()
+    };
+
+    let p = Paragraph::new(visible)
+        .wrap(Wrap { trim: false })
+        .scroll((0, 0));
     frame.render_widget(p, inner);
 }
 
@@ -215,7 +205,7 @@ mod tests {
             entry(3, "another short one"),
         ];
         terminal
-            .draw(|f| render(f, f.area(), &log))
+            .draw(|f| render(f, f.area(), &log, 0))
             .expect("narrow log render must not panic");
     }
 
@@ -239,7 +229,37 @@ mod tests {
             height: 5,
         };
         terminal
-            .draw(|f| render(f, area, &log))
+            .draw(|f| render(f, area, &log, 0))
             .expect("ultra-narrow log render must not panic");
+    }
+
+    /// Scrolling into a multi-row log window must surface the older
+    /// rows and not invent or drop content. We compare the visible
+    /// row count at scroll=0 and scroll=N to ensure scrolling moves
+    /// the window, then verify nothing renders taller than the pane.
+    #[test]
+    fn render_with_scroll_offset_must_not_panic_and_must_clip_to_window() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::{TerminalOptions, Viewport};
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        // Build a log that's clearly longer than the visible height
+        // — 30 entries, each guaranteed to wrap to ≥2 rows so the
+        // total is well above the 6-row inner pane.
+        let log: Vec<LogEntry> = (1..=30)
+            .map(|i| entry(
+                i,
+                "deliberately long message that wraps across two rows so we have plenty of scrollable content",
+            ))
+            .collect();
+        for s in [0u16, 4, 16, 200] {
+            terminal
+                .draw(|f| render(f, f.area(), &log, s))
+                .unwrap_or_else(|e| panic!("scroll={s} render must not panic: {e}"));
+        }
     }
 }

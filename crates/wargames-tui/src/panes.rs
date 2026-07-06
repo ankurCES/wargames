@@ -20,6 +20,8 @@
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+use crate::widget_action;
+
 /// Width below which we give up and ask the user to enlarge the terminal.
 /// 24 cols is the smallest width at which any of the four game widgets
 /// (state, predict, radar, action) can render something readable — under
@@ -215,6 +217,13 @@ pub fn game_layout(area: Rect) -> GameRects {
     }
 
     // Medium & Wide: 2×2 grid + log strip in the body.
+    //
+    // The right column gets a fixed minimum width derived from the
+    // longest action row so the action panel is always fully legible
+    // (every verb + description visible without truncation). When the
+    // terminal is narrower than 2 × that minimum, we degrade to a
+    // single-column layout instead of forcing a squeeze — that case is
+    // already covered by Compact, but the guard keeps the math safe.
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -223,18 +232,35 @@ pub fn game_layout(area: Rect) -> GameRects {
         ])
         .split(body);
 
-    let col_split: [u16; 2] = match breakpoint {
-        Breakpoint::Medium => [50, 50],
-        // Wide (and any future >= 120): original 35/65 split.
-        Breakpoint::Wide | _ => [35, 65],
+    // Action panel width budget: 2 borders + the desired inner width.
+    // The widget reads `inner.width` and downsizes gracefully if we ever
+    // hand it less, but the layout's job is to *not* let that happen.
+    let action_panel_outer = widget_action::desired_inner_width().saturating_add(2);
+    let right_min = action_panel_outer.max(0);
+    // For the body to be wider than `right_min × 2`, otherwise fall
+    // back to a balanced split so both columns still get some space.
+    let body_cols = if rows[0].width >= right_min * 2 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(right_min),
+            ])
+            .split(rows[0])
+    } else {
+        // Too narrow for the side-panel — use a balanced split as a
+        // fallback so the panes remain visible (each one will then
+        // honour `widget_action::desired_inner_width` inside its own
+        // line rendering).
+        let diff_break = (rows[0].width / 2).max(widget_action::ACTION_PANEL_MIN_INNER_WIDTH);
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(diff_break),
+                Constraint::Min(0),
+            ])
+            .split(rows[0])
     };
-    let body_cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(col_split[0]),
-            Constraint::Percentage(col_split[1]),
-        ])
-        .split(rows[0]);
 
     let left_rows = Layout::default()
         .direction(Direction::Vertical)
@@ -243,7 +269,10 @@ pub fn game_layout(area: Rect) -> GameRects {
 
     let right_rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([
+            Constraint::Percentage(60), // radar on top
+            Constraint::Percentage(40), // action panel on bottom — always visible
+        ])
         .split(body_cols[1]);
 
     GameRects {
@@ -414,15 +443,50 @@ mod tests {
         assert!(r.radar.width > 0);
         assert!(r.action.width > 0);
         assert!(r.log.width > 0);
-        // Two columns at 50/50 — each pane should be ~half the width.
-        // (It's a percentage split, so allow a 1-cell slop for rounding.)
-        let diff = (r.state.width as i32 - r.radar.width as i32).abs();
+        // The right column is sized to fit the action panel, so the
+        // state column is `width - right_min`. We don't assert
+        // 50/50 anymore — the contract is "action panel always
+        // legible", not "two equal columns". This test only verifies
+        // every pane is visible.
+        let panel_min = widget_action::desired_inner_width() + 2; // include borders
         assert!(
-            diff <= 2,
-            "Medium should be 50/50 (diff {diff}, state={}, radar={})",
-            r.state.width,
-            r.radar.width
+            r.action.width >= panel_min,
+            "Medium must keep action panel ≥ {} cells (got {})",
+            panel_min,
+            r.action.width
         );
+    }
+
+    #[test]
+    fn game_layout_wide_keeps_action_panel_at_least_as_wide_as_longest_row() {
+        // The whole point of the responsive redesign is that the
+        // action menu is a *visible* side panel — its inner width is
+        // sized to fit every verb + its description. Asserting the
+        // invariant at the canonical Wide geometry (160x40) plus a
+        // few medium geometries is enough to lock the contract.
+        for (w, h) in [(160u16, 40u16), (120, 32), (100, 30), (95, 30)] {
+            let area = Rect { x: 0, y: 0, width: w, height: h };
+            let r = game_layout(area);
+            let action_inner = r.action.width.saturating_sub(2);
+            assert!(
+                action_inner >= widget_action::desired_inner_width(),
+                "{w}x{h}: action inner width {action_inner} must fit longest row {}",
+                widget_action::desired_inner_width()
+            );
+            // Action panel must sit on the right side of the body and
+            // own at least 40% of the vertical space (it's the bottom
+            // row of the right column).
+            assert!(
+                r.action.x >= r.state.x,
+                "action panel must be on the right of (or below) the state column"
+            );
+            assert!(
+                r.action.height >= r.radar.height / 2,
+                "action panel must remain visible (height {} must be >= radar height/2 {})",
+                r.action.height,
+                r.radar.height / 2
+            );
+        }
     }
 
     #[test]
@@ -435,14 +499,14 @@ mod tests {
         };
         let r = game_layout(area);
         assert_eq!(r.breakpoint, Breakpoint::Wide);
-        // 35/65 → state column should be noticeably narrower than
-        // radar+action column. For 158 inner cols (160 - 2 borders),
-        // state ≈ 55 and radar ≈ 103.
+        // The right column holds the *fixed minimum* action panel —
+        // so state column may now be wider than before but the right
+        // column must remain at least as wide as the action panel.
         assert!(
-            r.state.width + 10 < r.radar.width,
-            "Wide should be 35/65 (state={}, radar={})",
-            r.state.width,
-            r.radar.width
+            r.radar.width >= widget_action::desired_inner_width(),
+            "Wide right column should accommodate the action panel (radar width {}, panel needs {})",
+            r.radar.width,
+            widget_action::desired_inner_width()
         );
     }
 

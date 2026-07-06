@@ -135,6 +135,15 @@ pub struct App {
     /// visibly ticks. Empty until the engine has applied the first
     /// action; the widget renders a friendly empty state in that case.
     pub contacts: Vec<Contact>,
+    /// Log vertical scroll offset (rows from the top). `0` means
+    /// auto-follow the tail; any larger value is "user paged up". The
+    /// render widget treats this as the row offset inside a
+    /// `(wrapped_lines, height)` projection of the full log.
+    pub log_scroll: u16,
+    /// Cached height of the last log render — used by PageUp/PageDown
+    /// to translate "rows in the visible window" into "offset rows"
+    /// without re-querying ratatui.
+    pub log_view_height: u16,
 }
 
 impl App {
@@ -186,6 +195,8 @@ impl App {
             mode: Mode::PlayerVsWorld,
             active_pane: PaneKind::State,
             contacts: Vec::new(),
+            log_scroll: 0,
+            log_view_height: 0,
         }
     }
 
@@ -712,6 +723,22 @@ impl App {
             }
             _ => {}
         }
+        // Log-scrolling keys work even while an LLM call is in flight
+        // (the user must be able to inspect past events while waiting).
+        // Esc still quits, in both modes.
+        let log_keys = matches!(
+            code,
+            KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::Char('k')
+                | KeyCode::Char('j')
+        );
+        if log_keys {
+            self.handle_log_scroll_key(code);
+            return false;
+        }
         // Block non-pane-cycling input during background work.
         if self.bg.is_busy() {
             return false;
@@ -762,6 +789,79 @@ impl App {
         let i = self.action_list.selected().unwrap_or(0);
         let prev = if i == 0 { len - 1 } else { i - 1 };
         self.action_list.select(Some(prev));
+    }
+
+    /// Translate a scroll key into a new `log_scroll` value. Bound to
+    /// the cached `log_view_height` so `PageUp`/`PageDown` page by the
+    /// visible window (one full page each press), `k`/`j` move one
+    /// row at a time, and `Home`/`End` jump to the start / re-attach
+    /// to the tail respectively.
+    ///
+    /// This is intentionally cheap and side-effect-free beyond
+    /// updating `log_scroll` — the actual clip happens inside
+    /// `widget_log::render` so the UI is always consistent with the
+    /// current state of the world.
+    pub fn handle_log_scroll_key(&mut self, code: KeyCode) {
+        // Page size defaults to a full viewport if we have not yet
+        // cached one (e.g. the very first key press before render).
+        let page = self.log_view_height.max(1) as u16;
+        // The widget clamps to a non-negative offset, so we only
+        // need to track an upper bound here. We approximate the
+        // number of wrapped rows from the log itself — exact count
+        // only matters for the scroll cap, which the widget
+        // re-clamps anyway.
+        let log_rows = self
+            .world
+            .as_ref()
+            .map(|w| {
+                let mut count: u64 = 0;
+                for entry in &w.log {
+                    count = count.saturating_add(1); // header row
+                    let wrapped = crate::text::wrap_to_width(
+                        &entry.message,
+                        // row width is unknown here without `Rect`; we
+                        // pick a conservative 60-cell budget that
+                        // matches the typical mid-Wide log width. The
+                        // widget tolerates any positive estimate and
+                        // always renders the actual content.
+                        60,
+                    );
+                    if wrapped.len() > 1 {
+                        count = count.saturating_add((wrapped.len() as u64) - 1);
+                    }
+                }
+                count
+            })
+            .unwrap_or(0);
+        let max_scroll = log_rows.saturating_sub(page as u64).min(u16::MAX as u64)
+            as u16;
+        match code {
+            KeyCode::PageUp => {
+                self.log_scroll = self.log_scroll.saturating_add(page);
+                if self.log_scroll > max_scroll {
+                    self.log_scroll = max_scroll;
+                }
+            }
+            KeyCode::PageDown => {
+                self.log_scroll = self.log_scroll.saturating_sub(page);
+            }
+            KeyCode::Home => {
+                self.log_scroll = max_scroll;
+            }
+            KeyCode::End => {
+                self.log_scroll = 0;
+            }
+            KeyCode::Char('k') => {
+                self.log_scroll = self.log_scroll.saturating_add(1);
+                if self.log_scroll > max_scroll {
+                    self.log_scroll = max_scroll;
+                }
+            }
+            KeyCode::Char('j') => {
+                self.log_scroll = self.log_scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
     }
 
     fn commit_action(&mut self) {
@@ -829,6 +929,13 @@ impl App {
             ^ ((w.tension * 100.0) as u64).wrapping_mul(31)
             ^ (w.defcon as u64).wrapping_mul(7);
         self.contacts = widget_radar::sample_contacts(seed, 5);
+        // Auto-follow the latest log entry: a new event arriving
+        // while the user is mid-scroll would otherwise leave them
+        // anchored to a stale row. Honoring scroll position when the
+        // user is *already* at the tail is implicit — scroll=0 is the
+        // tail, so this reset only changes behaviour when the user
+        // has actively paged up.
+        self.log_scroll = 0;
     }
 
     /// Build the user message that goes to the LLM.
@@ -1163,7 +1270,10 @@ impl App {
             .as_ref()
             .map(|w| w.log.clone())
             .unwrap_or_default();
-        render_log(frame, r.log, &log);
+        // Cache the visible window height so PageUp/PageDown can
+        // translate "viewport rows" into scroll units.
+        self.log_view_height = r.log.height;
+        render_log(frame, r.log, &log, self.log_scroll);
         self.render_status_line(frame);
     }
 
@@ -1187,7 +1297,8 @@ impl App {
             .as_ref()
             .map(|w| w.log.clone())
             .unwrap_or_default();
-        render_log(frame, r.log, &log);
+        self.log_view_height = r.log.height;
+        render_log(frame, r.log, &log, self.log_scroll);
         self.render_status_line(frame);
     }
 
@@ -1304,6 +1415,14 @@ pub enum KeyCode {
     Tab,
     /// Shift+Tab (crossterm surfaces this as `BackTab`).
     BackTab,
+    /// Page up — event-log paging in the game screen.
+    PageUp,
+    /// Page down — event-log paging in the game screen.
+    PageDown,
+    /// Home — jump to the oldest log entry visible from the top.
+    Home,
+    /// End — re-attach to the most recent log entry.
+    End,
     Char(char),
     Any,
 }
@@ -2102,6 +2221,113 @@ mod playable_flow_tests {
         assert!(
             app.contacts.is_empty(),
             "with no world loaded, the radar must stay empty (not panic, not invent fake contacts)"
+        );
+    }
+
+    /// PageUp / PageDown / Home / End adjust `log_scroll` without
+    /// disturbing gameplay state (screen, opponent_pending, etc).
+    #[test]
+    fn log_scroll_keys_advance_offset_and_quit_still_works() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Mode
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        // Confirm we are in the game screen.
+        assert_eq!(app.screen, Screen::Game);
+
+        // Mock the visible log height as if a render had just run.
+        app.log_view_height = 4;
+
+        // Drive a handful of turns so the log is long enough to
+        // exercise PageUp / PageDown (one event line isn't scrollable).
+        // The heuristic opponent is synchronous, so we can chain
+        // turns in a tight loop.
+        for _ in 0..6 {
+            app.handle_game_key(KeyCode::Enter);
+            let _ = app.apply_heuristic_opponent();
+            if app.screen != Screen::Game {
+                break;
+            }
+        }
+        // Build a synthetic "long log" by injecting extra entries —
+        // avoids depending on the heuristic producing many lines and
+        // keeps the test invariant simple: scroll math *given* the
+        // current log length.
+        if let Some(w) = app.world.as_mut() {
+            for t in 100..130u32 {
+                w.log.push(LogEntry {
+                    turn: t,
+                    side: "us".into(),
+                    kind: "outcome".into(),
+                    message: "extra event for scrolling tests".into(),
+                });
+            }
+        }
+
+        // Anchor at tail.
+        assert_eq!(app.log_scroll, 0);
+        // PageUp moves the offset up by the viewport height.
+        app.handle_game_key(KeyCode::PageUp);
+        assert!(app.log_scroll > 0, "PageUp must move scroll up");
+        let after_pgup = app.log_scroll;
+        // Another PageUp either moves further or clamps at max.
+        app.handle_game_key(KeyCode::PageUp);
+        assert!(
+            app.log_scroll >= after_pgup,
+            "second PageUp must not regress (was {after_pgup}, now {})",
+            app.log_scroll
+        );
+        // PageDown takes us back toward the tail.
+        app.handle_game_key(KeyCode::PageDown);
+        assert!(
+            app.log_scroll <= after_pgup,
+            "PageDown must move scroll back toward tail"
+        );
+        // End re-anchors at the tail.
+        app.handle_game_key(KeyCode::End);
+        assert_eq!(app.log_scroll, 0);
+        // k/j also work, moving one row at a time. Use a log that is
+        // guaranteed to exceed the viewport so neither clamps.
+        // We re-page up first so we have headroom for j to return.
+        app.handle_game_key(KeyCode::PageUp);
+        app.handle_game_key(KeyCode::PageUp);
+        let before_k = app.log_scroll;
+        app.handle_game_key(KeyCode::Char('k'));
+        assert_eq!(
+            app.log_scroll,
+            before_k + 1,
+            "k must advance scroll by exactly one row"
+        );
+        app.handle_game_key(KeyCode::Char('j'));
+        assert_eq!(app.log_scroll, before_k, "j must regress scroll by one row");
+        // The screen is still the game; scroll keys must not quit.
+        assert_eq!(app.screen, Screen::Game);
+        // Esc still quits.
+        assert!(app.handle_game_key(KeyCode::Esc));
+    }
+
+    /// `refresh_contacts` is called on every world mutation; it resets
+    /// `log_scroll` to 0 so the new event auto-follows the tail.
+    #[test]
+    fn log_scroll_resets_to_tail_on_world_mutation() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter);
+        // Pretend the user scrolled away.
+        app.log_scroll = 17;
+        // A new turn mutates the world; `refresh_contacts` is in that
+        // path so the tail-snapping also runs there.
+        let turn_before = app.world.as_ref().unwrap().turn;
+        app.handle_game_key(KeyCode::Enter);
+        assert!(
+            app.world.as_ref().unwrap().turn > turn_before
+                || app.opponent_pending,
+            "action must mutate the world or queue an opponent reply"
+        );
+        assert_eq!(
+            app.log_scroll, 0,
+            "every world mutation must snap the log back to the tail"
         );
     }
 }
