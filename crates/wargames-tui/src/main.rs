@@ -262,6 +262,9 @@ let rt = Runtime::new().expect("tokio runtime");
                 app.streaming_message.clear();
                 app.streaming_comm_idx = None;
                 app.streaming_action = None;
+                // Reset comm strip scroll so the new turn's text
+                // starts at the head. Keeps long comms readable.
+                app.comm_scroll = 0;
                 let tx_done = tx.clone();
                 rt.spawn(async move {
                     let (stream_tx, mut stream_rx) =

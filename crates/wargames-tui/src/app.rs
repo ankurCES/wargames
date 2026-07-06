@@ -127,6 +127,12 @@ pub struct App {
     /// a per-turn channel, read by the run loop on every tick. Cleared at
     /// the start of every opponent turn.
     pub streaming_message: String,
+    /// Scroll offset (rows) inside the streaming comm strip. The
+    /// streaming comm is shown in a 1-row strip above the status line
+    /// so the user can read longer-than-1-line messages. `PgUp`/
+    /// `PgDn`/`j`/`k` move this offset while the LLM is streaming.
+    /// Reset to `0` when a new streaming turn starts.
+    pub comm_scroll: u16,
     /// Index of the in-flight comm entry in `world.log` while the LLM
     /// is streaming. `None` between turns. The first streamed delta
     /// pushes a placeholder `LogEntry::comm` and stores its index
@@ -211,6 +217,7 @@ impl App {
             spinner_frame: 0,
             opponent_pending: false,
             streaming_message: String::new(),
+            comm_scroll: 0,
             streaming_comm_idx: None,
             streaming_action: None,
             mode: Mode::PlayerVsWorld,
@@ -893,17 +900,24 @@ impl App {
         }
     }
 
-    /// Translate a scroll key into a new `log_scroll` value. Bound to
-    /// the cached `log_view_height` so `PageUp`/`PageDown` page by the
-    /// visible window (one full page each press), `k`/`j` move one
-    /// row at a time, and `Home`/`End` jump to the start / re-attach
-    /// to the tail respectively.
+    /// Translate a scroll key into a new scroll offset. Bound to the
+    /// streaming comm strip when the LLM is busy, otherwise to the
+    /// event log. PageUp advances (forward into older rows /
+    /// wrapped lines), PageDown retreats, Home/End jump to start /
+    /// re-attach to tail.
     ///
     /// This is intentionally cheap and side-effect-free beyond
-    /// updating `log_scroll` — the actual clip happens inside
-    /// `widget_log::render` so the UI is always consistent with the
-    /// current state of the world.
+    /// updating the relevant offset — the actual clip happens in the
+    /// widget renderers so the UI is always consistent with the
+    /// current state.
     pub fn handle_log_scroll_key(&mut self, code: KeyCode) {
+        // While the LLM is streaming, route scroll keys to the
+        // comm strip so the user can read the full comm response
+        // even when it spans multiple wrapped rows.
+        if self.bg.is_busy() && !self.streaming_message.is_empty() {
+            self.handle_comm_scroll_key(code);
+            return;
+        }
         // Page size defaults to a full viewport if we have not yet
         // cached one (e.g. the very first key press before render).
         let page = self.log_view_height.max(1) as u16;
@@ -961,6 +975,39 @@ impl App {
             }
             KeyCode::Char('j') => {
                 self.log_scroll = self.log_scroll.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    /// Scroll the streaming comm strip. We compute the wrapped-row
+    /// count the same way as the strip renderer, then translate
+    /// PgUp/PgDn into a bounded offset. The full message always
+    /// reaches the log when streaming finishes — this is just the
+    /// live preview's scroll window.
+    fn handle_comm_scroll_key(&mut self, code: KeyCode) {
+        // Wrap budget equal to the renderer's — we don't have an
+        // `Rect` here, so we pick the worst-case log width (~80 cols)
+        // and subtract the strip's leading " » soviet: " prefix.
+        let prefix_len = " » soviet: ".chars().count();
+        let msg_width = 80_usize.saturating_sub(prefix_len + 1).max(4);
+        let total = crate::text::wrap_to_width(&self.streaming_message, msg_width)
+            .len()
+            .max(1);
+        let max_off = total.saturating_sub(1) as u16;
+        match code {
+            KeyCode::PageUp | KeyCode::Char('k') => {
+                self.comm_scroll =
+                    (self.comm_scroll.saturating_add(1)).min(max_off);
+            }
+            KeyCode::PageDown | KeyCode::Char('j') => {
+                self.comm_scroll = self.comm_scroll.saturating_sub(1);
+            }
+            KeyCode::Home => {
+                self.comm_scroll = max_off;
+            }
+            KeyCode::End => {
+                self.comm_scroll = 0;
             }
             _ => {}
         }
@@ -1249,40 +1296,102 @@ impl App {
 
     fn render_status_line(&self, frame: &mut ratatui::Frame) {
         use ratatui::style::{Color, Style};
+        use ratatui::text::Line;
         use ratatui::widgets::Paragraph;
-        let area = ratatui::layout::Rect {
+        // While the LLM is streaming, we render two rows at the bottom:
+        //   row 0 (upper): the live comm message, wrapped, scrolled by `comm_scroll`
+        //   row 1 (lower): the regular status hint (action keys)
+        // The comm strip is reserved only while `bg.is_busy() &&
+        // !streaming_message.is_empty()`. Outside that window only
+        // the bottom row is used, so screen geometry for everything
+        // above stays the same.
+        let fa = frame.area();
+        let streaming = self.bg.is_busy() && !self.streaming_message.is_empty();
+        let status_y = fa.height.saturating_sub(1);
+        let comm_y = fa.height.saturating_sub(2);
+
+        if streaming {
+            // Render the comm strip on the second-to-last row.
+            let comm_area = ratatui::layout::Rect {
+                x: 0,
+                y: comm_y,
+                width: fa.width,
+                height: 1,
+            };
+            self.render_streaming_comm_strip(frame, comm_area);
+        }
+
+        let status_area = ratatui::layout::Rect {
             x: 0,
-            y: frame.area().height.saturating_sub(1),
-            width: frame.area().width,
+            y: status_y,
+            width: fa.width,
             height: 1,
         };
-        // While the LLM is streaming, show the partial message in the
-        // status line so the user sees tokens as they arrive. Once the
-        // task completes, fall back to the regular status text.
-        //
-        // IMPORTANT: we measure display width, not byte length, so multi-byte
-        // tokens (`—`, `…`, anything non-ASCII) don't panic on a non-char
-        // boundary slice. We only fall back to `…`-truncation when the
-        // streaming buffer genuinely overflows the cell budget; otherwise
-        // the entire message fits and is shown verbatim — we never truncate
-        // a message that already fits, even at narrow widths.
-        let line = if self.bg.is_busy() && !self.streaming_message.is_empty() {
-            // Reserve cells for the leading " » soviet: " prefix and a
-            // trailing safety margin.
-            let prefix = " » soviet: ";
-            let max = (area.width as usize).saturating_sub(prefix.len() + 1);
-            let shown = fit_to_status_width(&self.streaming_message, max);
-            format!("{prefix}{shown}")
+        // Regular status hint — same key hints as before, with the
+        // scroll hint while streaming so the user knows how to read
+        // a long comm.
+        let line = if streaming {
+            Line::from(format!(
+                " {}    [PgUp/PgDn] scroll comm  [↑↓] action  [Enter] commit  [p] predict  [Esc] quit",
+                self.status
+            ))
         } else {
-            format!(
+            Line::from(format!(
                 " {}    [↑↓] action  [Enter] commit  [p] refresh predict  [Esc] quit",
                 self.status
-            )
+            ))
         };
         let p = Paragraph::new(line).style(
             Style::default()
                 .bg(Color::Rgb(20, 20, 20))
                 .fg(theme::current().status_text),
+        );
+        frame.render_widget(p, status_area);
+    }
+
+    /// Render the live streaming comm message into a 1-row strip at
+    /// the bottom of the screen, just above the status line. The
+    /// message is wrapped to the strip width and `comm_scroll` rows
+    /// of head-padding are applied so longer-than-1-line responses
+    /// are fully readable by paging up.
+    ///
+    /// Note: with only 1 row visible, "scrolling" really means
+    /// choosing which **wrapped row** to display. We compute the
+    /// wrapped rows, then show `lines[comm_scroll..comm_scroll+1]`.
+    /// That way the full message text is reachable (PgUp/Down) and
+    /// no characters are dropped (the log holds the canonical text
+    /// even when the strip is busy).
+    fn render_streaming_comm_strip(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+    ) {
+        use ratatui::style::{Color, Style};
+        use ratatui::text::Line;
+        use ratatui::widgets::Paragraph;
+        let theme = theme::current();
+        // Wrap the message to `area.width` minus the prefix. We
+        // use the same `wrap_to_width` so non-Latin scripts and
+        // emoji-bound tokens behave identically to the log widget.
+        let prefix = " » soviet: ";
+        let msg_width = (area.width as usize)
+            .saturating_sub(prefix.chars().count() + 1) // +1 = trailing cursor safety
+            .max(4);
+        let wrapped = crate::text::wrap_to_width(&self.streaming_message, msg_width);
+        let total_rows = wrapped.len().max(1);
+        // Show the row at index `comm_scroll`, clamped so the
+        // user can't paginate past the end. PgUp advances forward
+        // (skip older head rows), PgDn back to the start.
+        let scroll = (self.comm_scroll as usize).min(total_rows.saturating_sub(1));
+        let line_text = if wrapped.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{}{}", prefix, wrapped[scroll])
+        };
+        let p = Paragraph::new(Line::from(line_text)).style(
+            Style::default()
+                .bg(Color::Rgb(20, 20, 20))
+                .fg(theme.log_opp),
         );
         frame.render_widget(p, area);
     }
@@ -2569,6 +2678,95 @@ mod playable_flow_tests {
         assert_eq!(app.screen, Screen::Game);
         // Esc still quits.
         assert!(app.handle_game_key(KeyCode::Esc));
+    }
+
+    /// When the LLM is streaming, scroll keys (PgUp/PgDn/j/k/Home/End)
+    /// must advance `comm_scroll` instead of `log_scroll`. This is
+    /// the contract that lets the user read the *full* streaming
+    /// comm — without it the strip would be stuck on row 0 and the
+    /// full response would only be reachable in the log after
+    /// streaming completes.
+    #[test]
+    fn comm_scroll_keys_route_to_comm_strip_while_streaming() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Mode
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        assert_eq!(app.screen, Screen::Game);
+
+        // Drive a single heuristic turn so `log_scroll` resets to 0
+        // and the world has at least one event. Then force the
+        // comm-strip render path: bg busy + a multi-line streaming
+        // message that wraps across several rows at ~80 cols.
+        let _ = app.handle_game_key(KeyCode::Enter);
+        let _ = app.apply_heuristic_opponent();
+        assert_eq!(app.log_scroll, 0);
+        app.set_llm_busy();
+        // ~80-col budget × ~12 words/line ≈ a multi-line wrap.
+        let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+        app.streaming_message = long.to_string();
+        assert_eq!(app.comm_scroll, 0);
+
+        // k advances inside the comm strip.
+        app.handle_game_key(KeyCode::Char('k'));
+        assert!(
+            app.comm_scroll > 0,
+            "k must advance comm_scroll while streaming; got {}",
+            app.comm_scroll
+        );
+        // log_scroll is untouched (the comm strip is taking over).
+        assert_eq!(app.log_scroll, 0);
+
+        // PgUp advances further (covers at least one row beyond k).
+        let before = app.comm_scroll;
+        app.handle_game_key(KeyCode::PageUp);
+        assert!(
+            app.comm_scroll > before,
+            "PgUp must push comm_scroll forward; before={}, after={}",
+            before,
+            app.comm_scroll
+        );
+
+        // PgDn reverts one step.
+        let peak = app.comm_scroll;
+        app.handle_game_key(KeyCode::PageDown);
+        assert_eq!(
+            app.comm_scroll,
+            peak - 1,
+            "PgDn must regress comm_scroll by exactly 1"
+        );
+
+        // End re-anchors at row 0.
+        app.handle_game_key(KeyCode::End);
+        assert_eq!(app.comm_scroll, 0);
+
+        // After streaming ends, scroll keys route back to the log,
+        // not the comm strip. We turn bg off, run a few key presses
+        // against a long log, and check that `log_scroll` advances
+        // (synthetic long log injected below).
+        app.set_idle();
+        app.streaming_message.clear();
+        assert_eq!(app.comm_scroll, 0);
+        app.log_view_height = 4;
+        if let Some(w) = app.world.as_mut() {
+            for t in 100..130u32 {
+                w.log.push(LogEntry {
+                    turn: t,
+                    side: "us".into(),
+                    kind: "outcome".into(),
+                    language: Language::English,
+                    message: "extra event for scrolling tests".into(),
+                });
+            }
+        }
+        let before = app.log_scroll;
+        app.handle_game_key(KeyCode::Char('k'));
+        assert_eq!(
+            app.log_scroll,
+            before + 1,
+            "after streaming ends, k must drive log_scroll, not comm_scroll"
+        );
+        assert_eq!(app.comm_scroll, 0);
     }
 
     /// `refresh_contacts` is called on every world mutation; it resets

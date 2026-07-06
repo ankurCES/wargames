@@ -113,75 +113,116 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
     let grid_x_offset = (grid_w.saturating_sub(diameter)) / 2;
     let grid_y_end = grid_h;
 
-    // Build a 2D cell buffer: `cells[y][x] = Option<(char, Color)>`.
-    // We layer: ground (rings + spokes), then contacts.
+    // Layer order (later overwrites earlier):
+    //   1. background grid: concentric rings + cardinal/diagonal spokes
+    //   2. cardinal letters (N/E/S/W) on the outermost ring axis
+    //   3. centre hull marker
+    //   4. contact dots, plotted by (bearing_deg, range)
     let mut cells: Vec<Vec<Option<(char, Color)>>> =
         vec![vec![None; diameter]; diameter];
     let dim = Color::Rgb(60, 60, 60);
+    let spoke_color = Color::Rgb(80, 80, 80);
     let accent = theme.radar_ghost;
 
-    // Concentric rings at 25/50/75/100% of the radius. Drawn with
-    // box-drawing arcs that close the circle cleanly. We use ASCII
-    // because Unicode arcs (`╭╮╰╯`) only mark the bounding box, not
-    // the per-ring curve.
     let cx = diameter as f32 / 2.0;
     let cy = (diameter as f32) / 2.0;
     let max_r = (diameter as f32) / 2.0;
+
+    // Concentric rings at 25/50/75/100% of the radius. The outermost
+    // ring is brighter (it's the radar's effective horizon) and the
+    // inner rings fade so the centre doesn't get visually noisy.
+    // We use `*` for the outer ring and `·` for the inner three.
+    let ring_target: [(f32, char); 4] = [
+        (0.25, '·'),
+        (0.50, '·'),
+        (0.75, '·'),
+        (1.00, '*'),
+    ];
+
     for y in 0..diameter {
         for x in 0..diameter {
             let dx = x as f32 - cx + 0.5;
             let dy = y as f32 - cy + 0.5;
             let dist = (dx * dx + dy * dy).sqrt();
-            // Spoke: align with one of the 8 cardinal/diagonal axes.
-            // We test dx≈0, dy≈0, |dx|≈|dy| for the 8 directions.
-            let on_spoke = {
-                let ax = dx.abs();
-                let ay = dy.abs();
-                let diag = (ax - ay).abs();
-                ax < 0.6 || ay < 0.6 || diag < 0.6
-            };
-            // Ring boundaries — draw a 1-cell ring at each quarter.
-            let ring_target = [0.25_f32, 0.5, 0.75, 1.0];
-            let on_ring = ring_target.iter().any(|t| {
+
+            // Ring hit? Use a 0.6-cell tolerance so the arcs look
+            // continuous rather than dotted.
+            let mut ring_hit: Option<char> = None;
+            for (t, ch) in ring_target.iter() {
                 let r = max_r * t;
-                (dist - r).abs() < 0.6
-            });
-            if on_ring || on_spoke {
-                let ch = if on_ring { '·' } else { '·' };
-                cells[y][x] = Some((ch, dim));
+                if (dist - r).abs() < 0.6 {
+                    // Outermost ring wins because we use `*` (more
+                    // visible) and inner rings use `·`.
+                    ring_hit = Some(*ch);
+                    // Don't break — let the loop continue so the outer
+                    // ring iteration overrides inner ones on the rare
+                    // case two radii overlap (only when `max_r < 1`).
+                }
+            }
+
+            // Spokes — 4 cardinals (N/E/S/W) plus, if there's room,
+            // 4 diagonals (NE/SE/SW/NW). We test for `dx≈0` (N/S),
+            // `dy≈0` (E/W), or `|dx|≈|dy|` (diagonals). Tolerance
+            // widens with radius so the spokes don't appear
+            // spotty near the centre.
+            let ax = dx.abs();
+            let ay = dy.abs();
+            let diag = (ax - ay).abs();
+            let cardinal = ax < 0.6 || ay < 0.6;
+            let diagonal = diag < 0.6 && !cardinal;
+            let on_spoke = if diameter >= 11 {
+                cardinal || diagonal
+            } else {
+                // Tight grids: keep only the 4 cardinals so the
+                // circle doesn't look like a spiderweb.
+                cardinal
+            };
+
+            match (ring_hit, on_spoke) {
+                (Some(_), true) => {
+                    // Spoke + ring crossing — show the ring char so
+                    // we don't drop the outer boundary.
+                    let ch = ring_hit.unwrap_or('·');
+                    cells[y][x] = Some((ch, accent));
+                }
+                (Some(ch), false) => {
+                    cells[y][x] = Some((ch, dim));
+                }
+                (None, true) => {
+                    cells[y][x] = Some(('·', spoke_color));
+                }
+                (None, false) => {}
             }
         }
     }
-    // Highlight the outermost ring slightly so the user sees the
-    // boundary clearly.
-    for y in 0..diameter {
-        for x in 0..diameter {
-            let dx = x as f32 - cx + 0.5;
-            let dy = y as f32 - cy + 0.5;
-            let dist = (dx * dx + dy * dy).sqrt();
-            if (dist - max_r).abs() < 0.6 {
-                cells[y][x] = Some(('·', accent));
-            }
+
+    // Cardinal letters on the outermost ring (the four cardinals of
+    // the compass). We place them so they're inside the radar's
+    // bounding box — never overwrite the outermost-ring chars we
+    // just drew. N lives one row above the centre column, E one
+    // column right of the centre row, etc.
+    let cxi = cx as i32;
+    let cyi = cy as i32;
+    let outer = (max_r.round() as i32) - 1; // sit just inside the ring
+    let cardinals: [(char, i32, i32); 4] = [
+        ('N', cxi, cyi - outer.max(1)),
+        ('S', cxi, cyi + outer.max(1)),
+        ('E', cxi + outer.max(1), cyi),
+        ('W', cxi - outer.max(1), cyi),
+    ];
+    for (ch, x, y) in cardinals {
+        if x >= 0 && y >= 0 && (x as usize) < diameter && (y as usize) < diameter
+        {
+            cells[y as usize][x as usize] =
+                Some((ch, theme.radar_ghost));
         }
     }
-    // Centre marker — the player's own hull.
-    let cxi = cx as usize;
-    let cyi = cy as usize;
-    if cxi < diameter && cyi < diameter {
-        cells[cyi][cxi] = Some(('✸', theme.radar_us));
-    }
-    // Cardinal labels at the top of the grid — N, E, S, W. We only
-    // have room if the grid is wide enough.
-    if diameter >= 7 {
-        let n_str = "N";
-        let x_n = (cx as usize).saturating_sub(n_str.len() / 2);
-        // Place "N" one row above the topmost ring if there's
-        // space, otherwise overlay on the topmost row.
-        if grid_h >= diameter + 1 {
-            // We can't actually place text outside the cells
-            // buffer; skip and rely on the cardinal-only labelling
-            // via the grid shape.
-        }
+
+    // Centre marker — the player's own hull. Always overwrite the
+    // background so the centre reads clearly.
+    if cxi >= 0 && cyi >= 0 && (cxi as usize) < diameter && (cyi as usize) < diameter {
+        cells[cyi as usize][cxi as usize] =
+            Some(('✸', theme.radar_us));
     }
 
     // Place contacts. Map (bearing_deg, range) → (x, y). Bearing
@@ -245,13 +286,59 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
         lines.push(Line::from(spans));
     }
 
-    // Compact roster — top 2 contacts shown by id + side label so
-    // the data isn't lost when several contacts land on the same
-    // polar cell.
+    // Bottom row: a coloured legend that maps side colours to side
+    // names — "● US · ● NATO · ● SOVIET · ● NEUTRAL". Always at least
+    // one row, so the user can read the side-colour mapping without
+    // staring at the polar view. We lay it out row-major across all
+    // 4 sides; if the pane is too narrow for the full legend we
+    // tighten gaps until it fits.
+    let mut legend_spans: Vec<Span<'static>> = Vec::new();
+    let legend_pattern: Vec<(ContactSide, &str, &str)> = vec![
+        (ContactSide::Us, "●", "US"),
+        (ContactSide::Nato, "●", "NATO"),
+        (ContactSide::Soviet, "●", "SOVIET"),
+        (ContactSide::Neutral, "●", "NEUTRAL"),
+    ];
+    // Build the widest version first, then progressively tighten
+    // the separator between entries until the line fits.
+    let seps = [" · ", " ·", " "];
+    let mut legend_fits = false;
+    for sep in seps {
+        legend_spans.clear();
+        for (i, (side, dot, label)) in legend_pattern.iter().enumerate() {
+            if i > 0 {
+                legend_spans.push(Span::styled(
+                    sep.to_string(),
+                    Style::default().fg(theme.radar_ghost),
+                ));
+            }
+            legend_spans.push(Span::styled(
+                dot.to_string(),
+                Style::default().fg(side.color()).add_modifier(Modifier::BOLD),
+            ));
+            legend_spans.push(Span::styled(
+                format!(" {}", label),
+                Style::default().fg(theme.radar_ghost),
+            ));
+        }
+        let used: usize = legend_spans
+            .iter()
+            .map(|s| crate::text::display_width(&s.content))
+            .sum();
+        if used <= inner_w as usize {
+            legend_fits = true;
+            break;
+        }
+    }
+    let _ = legend_fits;
+    // Compact roster line: every contact's id + bearing (above the
+    // legend). We allow up to `roster_rows - 1` rows; if none, the
+    // legend still gets its full reserved line.
+    let roster_rows = roster_rows.saturating_sub(1).max(0);
     let roster: Vec<&Contact> = contacts.iter().take(roster_rows * 4).collect();
     let mut roster_line_count = 0;
     for chunk in roster.chunks(4) {
-        if grid_y_end + roster_line_count >= inner_h {
+        if lines.len() >= inner_h.saturating_sub(1) {
             break;
         }
         let mut spans: Vec<Span<'static>> = Vec::new();
@@ -274,9 +361,20 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
         lines.push(Line::from(spans));
         roster_line_count += 1;
     }
+    // Pad with blanks between roster and legend so we always leave
+    // the very last row for the legend.
+    while lines.len() < inner_h.saturating_sub(1) {
+        lines.push(Line::from(""));
+    }
+    // Legend gets the final reserved row.
+    if inner_h >= 1 {
+        lines.push(Line::from(legend_spans));
+    }
+
     // If the grid is wider than `inner_w`, we may have unused
     // vertical space — pad with blank lines so the bottom row
-    // doesn't get clipped.
+    // doesn't get clipped. (This is a defensive belt-and-braces —
+    // the loop above already pads to `inner_h - 1`.)
     while lines.len() < inner_h {
         lines.push(Line::from(""));
     }
@@ -293,12 +391,15 @@ pub fn render(frame: &mut Frame, area: Rect, contacts: &[Contact], scenario_titl
                 Style::default().fg(theme.radar_ghost),
             )),
         );
-        // Drop the last line so we still fit `inner_h` rows.
+        // Drop the last line so we still fit `inner_h` rows. The
+        // legend is the most important reservation, so we always
+        // trim from the tail.
         lines.pop();
     }
 
     let p = Paragraph::new(lines).wrap(Wrap { trim: false });
     frame.render_widget(p, inner);
+    let _ = roster_line_count;
 }
 
 /// Fallback renderer for panes too narrow/small for the polar grid
@@ -520,13 +621,29 @@ mod tests {
         // quadrant relative to (cx, cy). The `range=1.0` puts the
         // contact on the outermost ring, so its distance from
         // centre should be roughly the radar radius.
+        //
+        // The bottom row of the inner pane (and optionally the row
+        // above it) hosts the radar legend — coloured dots marking
+        // side colourings. We exclude those from the contact-dot
+        // count by skipping dots whose y sits in the last 2 rows
+        // of the inner pane (legend + roster rows are reserved at
+        // the bottom). The legend-dots all live ≥ `inner_h - 2`.
+        let inner_bottom_skip = 2u16;
         let mut dots: Vec<(u16, u16)> = Vec::new();
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
                 let cell = &buf[(x, y)];
-                if cell.symbol() == "\u{25CF}" {
-                    dots.push((x, y));
+                if cell.symbol() != "\u{25CF}" {
+                    continue;
                 }
+                // Skip anything in the last 2 rows of the inner
+                // pane — the legend row always lives there. Inner
+                // pane = `frame.area()` minus border (1 cell), so
+                // the inner bottom row is `frame.height - 2`.
+                if y + inner_bottom_skip >= buf.area.height {
+                    continue;
+                }
+                dots.push((x, y));
             }
         }
         // Diagnostic: dump the dots we found at their rendered
@@ -619,5 +736,161 @@ mod tests {
             "12 contacts should land on at least 3 distinct bearings, got {}",
             unique_bearings.len()
         );
+    }
+
+    /// The radar must render cardinal letters (N/E/S/W) inside the
+    /// polar grid and a coloured legend below it. The legend is the
+    /// user's only way to map dot colour to side name without
+    /// referencing docs, so its presence is contract-level.
+    #[test]
+    fn polar_radar_renders_cardinals_and_legend() {
+        let mut t = terminal(40, 24);
+        let contacts = vec![
+            Contact {
+                id: "c-N".into(),
+                side: ContactSide::Nato,
+                bearing: "N",
+                bearing_deg: 0,
+                range: 0.5,
+                speed_kn: 18,
+            },
+        ];
+        t.draw(|f| render(f, f.area(), &contacts, "")).expect("draw");
+        let buf = t.backend().buffer().clone();
+        // Walk the rendered buffer and look for the legend tokens —
+        // any of these being absent means the user has no way to
+        // map dot colour to side.
+        let s = buffer_to_string_radar(&buf);
+        assert!(
+            s.contains("US"),
+            "legend must contain US marker, rendered buffer:\n{s:?}"
+        );
+        assert!(
+            s.contains("NATO"),
+            "legend must contain NATO marker, rendered buffer:\n{s:?}"
+        );
+        assert!(
+            s.contains("SOVIET"),
+            "legend must contain SOVIET marker, rendered buffer:\n{s:?}"
+        );
+        assert!(
+            s.contains("NEUTRAL"),
+            "legend must contain NEUTRAL marker, rendered buffer:\n{s:?}"
+        );
+
+        // Cardinal letter test: locate the centre ✸, then expect
+        // letters N (above), S (below), E (right), W (left) along the
+        // outermost ring axis. We allow some jitter (the cardinal
+        // letters are placed by integer rounding).
+        let (cx, cy) = find_centre_radar(&buf);
+        let north = find_cardinal_north(&buf, cx, cy);
+        let east = find_cardinal_east(&buf, cx, cy);
+        let south = find_cardinal_south(&buf, cx, cy);
+        let west = find_cardinal_west(&buf, cx, cy);
+        assert_eq!(north, Some('N'), "north cardinal 'N' must render above centre; got {north:?}");
+        assert_eq!(south, Some('S'), "south cardinal 'S' must render below centre; got {south:?}");
+        assert_eq!(east, Some('E'), "east cardinal 'E' must render right of centre; got {east:?}");
+        assert_eq!(west, Some('W'), "west cardinal 'W' must render left of centre; got {west:?}");
+    }
+
+    fn buffer_to_string_radar(buf: &ratatui::buffer::Buffer) -> String {
+        let mut s = String::with_capacity(
+            (buf.area.width as usize) * (buf.area.height as usize),
+        );
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+        }
+        s
+    }
+
+    fn find_centre_radar(buf: &ratatui::buffer::Buffer) -> (u16, u16) {
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                if buf[(x, y)].symbol() == "\u{2738}" {
+                    return (x, y);
+                }
+            }
+        }
+        panic!("centre marker not found");
+    }
+
+    fn find_cardinal_north(
+        buf: &ratatui::buffer::Buffer,
+        cx: u16,
+        cy: u16,
+    ) -> Option<char> {
+        // Iterate from centre row upward; the N letter sits on the
+        // vertical axis (`x ≈ cx`) just inside the outermost ring.
+        // The legend lives in the very last rows so any y above cy
+        // is fair game.
+        for y in (0..cy).rev() {
+            if let Some(c) = nearest_axis_letter(buf, cx, y) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    fn find_cardinal_south(
+        buf: &ratatui::buffer::Buffer,
+        cx: u16,
+        cy: u16,
+    ) -> Option<char> {
+        // The legend lives in the last 1-2 rows; scan up to the row
+        // immediately above the legend.
+        let bottom = buf.area.height.saturating_sub(2);
+        for y in (cy + 1)..bottom {
+            if let Some(c) = nearest_axis_letter(buf, cx, y) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    fn find_cardinal_east(
+        buf: &ratatui::buffer::Buffer,
+        cx: u16,
+        cy: u16,
+    ) -> Option<char> {
+        for x in (cx + 1)..buf.area.width {
+            if let Some(c) = nearest_axis_letter(buf, x, cy) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    fn find_cardinal_west(
+        buf: &ratatui::buffer::Buffer,
+        cx: u16,
+        cy: u16,
+    ) -> Option<char> {
+        for x in (0..cx).rev() {
+            if let Some(c) = nearest_axis_letter(buf, x, cy) {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    fn nearest_axis_letter(
+        buf: &ratatui::buffer::Buffer,
+        x: u16,
+        y: u16,
+    ) -> Option<char> {
+        let s = buf[(x, y)].symbol();
+        if s == "N" {
+            Some('N')
+        } else if s == "S" {
+            Some('S')
+        } else if s == "E" {
+            Some('E')
+        } else if s == "W" {
+            Some('W')
+        } else {
+            None
+        }
     }
 }
