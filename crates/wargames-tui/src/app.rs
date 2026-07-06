@@ -26,6 +26,7 @@ use ratatui::widgets::ListState;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use wargames_core::engine::apply_action;
+use wargames_core::language::Language;
 use wargames_core::log::LogEntry;
 use wargames_core::predict::predict;
 use wargames_core::scenario::Scenario;
@@ -126,6 +127,12 @@ pub struct App {
     /// a per-turn channel, read by the run loop on every tick. Cleared at
     /// the start of every opponent turn.
     pub streaming_message: String,
+    /// Index of the in-flight comm entry in `world.log` while the LLM
+    /// is streaming. `None` between turns. The first streamed delta
+    /// pushes a placeholder `LogEntry::comm` and stores its index
+    /// here; subsequent deltas overwrite that entry's message in
+    /// place. `apply_opponent_action` clears it on completion.
+    pub streaming_comm_idx: Option<usize>,
     /// Final action assembled from the streaming tool-use input deltas.
     /// `None` until the SSE stream ends.
     pub streaming_action: Option<String>,
@@ -204,6 +211,7 @@ impl App {
             spinner_frame: 0,
             opponent_pending: false,
             streaming_message: String::new(),
+            streaming_comm_idx: None,
             streaming_action: None,
             mode: Mode::PlayerVsWorld,
             active_pane: PaneKind::State,
@@ -431,6 +439,8 @@ impl App {
                 scenario.opening_message.clone().unwrap_or_default(),
             )],
             terminal: None,
+            terror_actors: vec![],
+            alliances: vec![],
         };
         self.world = Some(world);
         self.scenario = Some(scenario);
@@ -1060,9 +1070,23 @@ impl App {
             return false;
         };
         let mut next = apply_action(world, Side::Opp, action);
+        // Drop the streaming placeholder (if any) — we'll push the
+        // finalized comm entry fresh so the log ends with the full
+        // text. The placeholder served its purpose during streaming.
+        if let Some(idx) = self.streaming_comm_idx.take() {
+            if let Some(w) = self.world.as_ref() {
+                if idx < w.log.len() && w.log[idx].kind == "comm" {
+                    // Clone-then-mutate pattern: `apply_action` is
+                    // already done, so we drop the placeholder from
+                    // `next.log` by re-mapping after the fact.
+                    next.log.remove(idx.min(next.log.len().saturating_sub(1)));
+                }
+            }
+        }
         if let Some(prev_msg) = message.lines().next() {
-            next.log.push(LogEntry::outcome(
+            next.log.push(LogEntry::comm(
                 next.turn,
+                "opp",
                 format!("soviet says: {}", prev_msg),
             ));
         }
@@ -1089,6 +1113,10 @@ impl App {
         let Some(world) = self.world.as_ref().cloned() else {
             return false;
         };
+        // Heuristic opponents don't stream — drop any leftover
+        // streaming-comm index from the previous turn so it can't
+        // be misread as the new turn's comm.
+        self.streaming_comm_idx = None;
         let opp_action = opponent_heuristic(&world);
         let next = apply_action(&world, Side::Opp, opp_action);
         self.world = Some(next);
@@ -1581,6 +1609,13 @@ fn parse_action_str(s: &str) -> Option<Action> {
         "intercept" => Some(Action::Intercept),
         "declassify" => Some(Action::Declassify),
         "harden" => Some(Action::Harden),
+        // Proxy / terror-actor actions (M5). Both snake_case and the
+        // more idiomatic hyphen form are accepted — players typing
+        // in the action bar shouldn't have to remember the underscore.
+        "fund_proxy" | "fund-proxy" | "fundproxy" => Some(Action::FundProxy),
+        "cut_support" | "cut-support" | "cutsupport" => Some(Action::CutSupport),
+        "strike_proxy" | "strike-proxy" | "strikeproxy" => Some(Action::StrikeProxy),
+        "sanction" => Some(Action::Sanction),
         _ => None,
     }
 }
@@ -1616,6 +1651,8 @@ fn build_world(scenario: &Scenario, faction: wargames_core::Faction) -> WorldSta
             format!("scenario \"{}\" engaged", scenario.title),
         )],
         terminal: None,
+        terror_actors: scenario.terror_actors.clone(),
+        alliances: scenario.alliances.clone(),
     }
 }
 
@@ -1723,6 +1760,12 @@ fn synthesised_scenario(entry: &ScenarioEntry) -> Scenario {
         soviet: None,
         opening_message: None,
         win_conditions: None,
+        // Auto-synthesised scenarios don't seed terror actors or
+        // alliances — those are hand-curated in `scenarios/*.json`
+        // files. Mirrors the procedural generator in
+        // `wargames-core::scenario::generator`.
+        terror_actors: vec![],
+        alliances: vec![],
     }
 }
 
@@ -1878,6 +1921,99 @@ mod playable_flow_tests {
         assert!(
             app.last_prediction.is_some(),
             "opponent response must refresh prediction"
+        );
+    }
+
+    /// M7 end-to-end contract: load a proxy scenario JSON, build
+    /// a `WorldState` from it, run `FundProxy` and `StrikeProxy`
+    /// actions through the real `apply_action` engine, and confirm
+    /// the world reflects the new mechanics. This is the bridge
+    /// between the data layer (M5: TerrorActor / Alliance) and the
+    /// action layer (M6: parser + ALL_ACTIONS).
+    #[test]
+    fn proxy_scenario_full_loop_applies_new_actions() {
+        use wargames_core::engine::apply_action;
+        use wargames_core::scenario::Scenario;
+        use wargames_core::Side;
+
+        let manifest_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let scenarios_dir = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("scenarios"))
+            .expect("repo scenarios dir resolves");
+        let scenario =
+            Scenario::from_path(scenarios_dir.join("eastern_med_proxy.json"))
+                .expect("eastern_med_proxy loads");
+        assert_eq!(
+            scenario.terror_actors.len(),
+            2,
+            "scenario must carry 2 terror actors"
+        );
+        // Build the same WorldState that app::build_world would.
+        let sides = [
+            wargames_core::SideState::default_player(),
+            wargames_core::SideState::default_opponent(),
+        ];
+        let mut world = wargames_core::WorldState {
+            turn: 1,
+            era: scenario.infer_era(),
+            theater: scenario.infer_theater(),
+            faction: scenario.faction.unwrap_or(wargames_core::Faction::Us),
+            defcon: 4,
+            tension: 40.0,
+            detection_pct: 45.0,
+            sides,
+            log: vec![],
+            terminal: None,
+            terror_actors: scenario.terror_actors.clone(),
+            alliances: scenario.alliances.clone(),
+        };
+
+        let budget_before = world.side(Side::Us).escalation_budget;
+        let tension_before = world.tension;
+        // 1) FundProxy: budget drops, tension rises, no terminal.
+        world = apply_action(&world, Side::Us, Action::FundProxy);
+        assert!(
+            world.side(Side::Us).escalation_budget < budget_before,
+            "FundProxy must cost budget"
+        );
+        assert!(
+            world.tension > tension_before,
+            "FundProxy must raise tension"
+        );
+        assert!(world.terminal.is_none(), "FundProxy must not terminate");
+
+        // 2) Heuristic opponent acts (we just call `apply_action`
+        // for Opp with a Patrol so the test is deterministic —
+        // the real opponent loop is exercised in the playable
+        // tests above).
+        world = apply_action(&world, Side::Opp, Action::Patrol);
+
+        // 3) StrikeProxy: detection rises, no terminal.
+        let detection_before = world.detection_pct;
+        world = apply_action(&world, Side::Us, Action::StrikeProxy);
+        assert!(
+            world.detection_pct >= detection_before,
+            "StrikeProxy must not lower detection"
+        );
+        assert!(
+            world.terminal.is_none(),
+            "StrikeProxy must not terminate the game"
+        );
+
+        // 4) Scenario's terror actors must still be present after
+        // 3 actions — actions mutate state but don't drop actors.
+        assert_eq!(
+            world.terror_actors.len(),
+            2,
+            "scenario actors must persist through actions"
+        );
+        assert_eq!(
+            world.alliances.len(),
+            1,
+            "scenario alliances must persist through actions"
         );
     }
 
@@ -2387,6 +2523,7 @@ mod playable_flow_tests {
                     turn: t,
                     side: "us".into(),
                     kind: "outcome".into(),
+                    language: Language::English,
                     message: "extra event for scrolling tests".into(),
                 });
             }
@@ -2521,5 +2658,135 @@ mod playable_flow_tests {
         app.open_settings();
         assert!(app.handle_settings_key(KeyCode::Char('q')));
         assert_eq!(app.screen, Screen::Settings);
+    }
+
+    /// The opponent's stream-into-log contract: a `comm` entry
+    /// materialises on the first streamed delta and is *edited in
+    /// place* on subsequent deltas, so the log row count grows by
+    /// exactly one even with many tokens. `apply_opponent_action`
+    /// then finalises the entry with the full transcript.
+    #[test]
+    fn streaming_comm_replaces_placeholder_in_place() {
+        use wargames_core::log::LogEntry;
+        let mut app = fresh_app();
+        // Drive to the game screen so `app.world` is populated.
+        app.handle_picker_key(KeyCode::Enter); // Mode
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        assert_eq!(app.screen, Screen::Game);
+        let log_len_before = app.world.as_ref().unwrap().log.len();
+
+        // Simulate three streamed deltas (the same loop `main.rs`
+        // runs on every LlmResult::Delta).
+        let deltas = ["привет ", "товарищ ", "— мы наблюдаем"];
+        for d in &deltas {
+            if app.streaming_comm_idx.is_none() {
+                if let Some(w) = app.world.as_mut() {
+                    w.log.push(LogEntry::comm(w.turn, "opp", String::new()));
+                    app.streaming_comm_idx = Some(w.log.len() - 1);
+                }
+            }
+            if let Some(idx) = app.streaming_comm_idx {
+                if let Some(w) = app.world.as_mut() {
+                    if let Some(entry) = w.log.get_mut(idx) {
+                        entry.message.push_str(d);
+                    }
+                }
+            }
+            app.streaming_message.push_str(d);
+        }
+        let log_after_stream = app.world.as_ref().unwrap().log.len();
+        assert_eq!(
+            log_after_stream,
+            log_len_before + 1,
+            "streaming must add exactly one comm row, not one per delta"
+        );
+        let placeholder = &app.world.as_ref().unwrap().log[log_after_stream - 1];
+        assert_eq!(placeholder.kind, "comm");
+        assert_eq!(placeholder.side, "opp");
+        assert_eq!(placeholder.message, "привет товарищ — мы наблюдаем");
+
+        // Finalise — `apply_opponent_action` must drop the placeholder
+        // and append the canonical comm entry. Note: `apply_action`
+        // itself pushes an "action" log entry first, so the comm is
+        // the *last* entry only after the placeholder is dropped.
+        let ok = app.apply_opponent_action("harden", "we see you");
+        assert!(ok);
+        assert!(app.streaming_comm_idx.is_none());
+        let log_final = app.world.as_ref().unwrap().log.clone();
+        let last = log_final.last().expect("log has at least one entry");
+        assert_eq!(
+            last.kind, "comm",
+            "final entry must be the comm row (not the action row); got {:?}",
+            last
+        );
+        assert!(
+            last.message.contains("soviet says: we see you"),
+            "final comm message must be the canonical transcript, got: {}",
+            last.message
+        );
+        // The placeholder at the streaming index must have been
+        // removed — no leftover "" entry should remain.
+        assert!(
+            !log_final.iter().any(|e| e.kind == "comm" && e.message.is_empty()),
+            "no empty-message placeholder rows should survive finalisation"
+        );
+        // Exactly one comm entry with the canonical text.
+        let canon = log_final
+            .iter()
+            .filter(|e| {
+                e.kind == "comm" && e.message.contains("soviet says: we see you")
+            })
+            .count();
+        assert_eq!(canon, 1, "exactly one canonical comm row must exist");
+    }
+
+    /// `parse_action_str` must accept the snake_case tags emitted
+    /// by `Action::as_str` for every Action variant — and the
+    /// hyphenated / concatenated alias forms for the multi-word
+    /// proxy actions (M6 ergonomics). If a future variant is added
+    /// without updating the parser, this test will fail.
+    #[test]
+    fn parse_action_str_accepts_every_variant() {
+        let cases: &[(&str, Action)] = &[
+            ("patrol", Action::Patrol),
+            ("feint", Action::Feint),
+            ("mobilize", Action::Mobilize),
+            ("strike", Action::Strike),
+            ("negotiate", Action::Negotiate),
+            ("disarm", Action::Disarm),
+            ("bluff", Action::Bluff),
+            ("stand_down", Action::StandDown),
+            ("standdown", Action::StandDown),
+            ("intercept", Action::Intercept),
+            ("declassify", Action::Declassify),
+            ("harden", Action::Harden),
+            // M5 proxy actions: accept snake_case, hyphen, and
+            // concatenated forms. The menu auto-generates the
+            // snake_case via `Action::as_str`; the other forms are
+            // for player convenience.
+            ("fund_proxy", Action::FundProxy),
+            ("fund-proxy", Action::FundProxy),
+            ("fundproxy", Action::FundProxy),
+            ("cut_support", Action::CutSupport),
+            ("cut-support", Action::CutSupport),
+            ("cutsupport", Action::CutSupport),
+            ("strike_proxy", Action::StrikeProxy),
+            ("strike-proxy", Action::StrikeProxy),
+            ("strikeproxy", Action::StrikeProxy),
+            ("sanction", Action::Sanction),
+        ];
+        for (input, expected) in cases.iter() {
+            let got = parse_action_str(input);
+            assert_eq!(
+                got,
+                Some(*expected),
+                "parse_action_str({input:?}) must produce {expected:?}, got {got:?}"
+            );
+        }
+        // Empty / garbage inputs must return None, not panic.
+        assert_eq!(parse_action_str(""), None);
+        assert_eq!(parse_action_str("  "), None);
+        assert_eq!(parse_action_str("not_an_action"), None);
     }
 }

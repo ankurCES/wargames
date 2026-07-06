@@ -81,6 +81,12 @@ pub fn generate_scenario(theater: Theater, seed: u64, era: Option<Era>, faction:
                 "Both sides launch within 2 turns of each other.".to_string(),
             ),
         }),
+        // Procedurally generated scenarios don't seed terror
+        // actors or alliances — those are hand-curated in
+        // `scenarios/*.json` files for now. The procedural path
+        // keeps the legacy bipolar shape so it stays test-stable.
+        terror_actors: vec![],
+        alliances: vec![],
     }
 }
 

@@ -1,0 +1,68 @@
+{
+    "id": "red_sea_freelance",
+    "title": "Red Sea, Freelance",
+    "briefing": "DEFCON 5. Three independent terror / pirate groups operate in the Red Sea and Gulf of Aden. None are state-sponsored — they answer to no patron. Cap their capability, sanction them into bankruptcy, or strike them off the board before they freelance an attack.",
+    "initial_state": "DEFCON_5",
+    "initial_detection_pct": 30,
+    "data_sources": ["open_sky", "osint_news", "ship_track"],
+    "faction": "us",
+    "era": "modern",
+    "gdelt_query": "Red Sea OR \"Gulf of Aden\" OR Houthi OR piracy OR drone boat",
+    "open_sky_bbox": [12, 22, 41, 51],
+    "feed_interval_ms": 60000,
+    "ship_tracks": [
+        { "name": "USS Arleigh Bk", "hull": "destroyer",  "kind": "us",     "speed_kn": 30 },
+        { "name": "FGS Bayern",     "hull": "frigate",    "kind": "nato",   "speed_kn": 26 },
+        { "name": "RFN Admiral K",  "hull": "frigate",    "kind": "soviet", "speed_kn": 24 }
+    ],
+    "us": {
+        "carriersOperational": 3,
+        "silosReady": 100,
+        "escalation_budget": 60
+    },
+    "soviet": {
+        "subsAtSea": 2,
+        "silosReady": 100,
+        "escalation_budget": 55
+    },
+    "map": {
+        "center": [15, 42],
+        "zoom": 4
+    },
+    "opening_message": "Independent terror / pirate groups active: Asabara Brigades, Marib Raiders, and the Bab el-Mandeb Company. None are state-sponsored — they answer to no patron. Fund? Sanction? Strike?",
+    "win_conditions": {
+        "disarm": "Reduce all three independent actors' capability to 0 through sanctions or strikes AND DEFCON ≤ 4.",
+        "defeat_strike": "Either great-power side launches first.",
+        "mutual_assured_destruction": "An unsponsored actor freelances a strike that drags both patrons in within 3 turns."
+    },
+    "terror_actors": [
+        {
+            "id": "asabara-brigades",
+            "name": "Asabara Brigades",
+            "region": "Red Sea coast",
+            "sponsor": "independent",
+            "capability": 35,
+            "radicalization": 60,
+            "autonomy": 70
+        },
+        {
+            "id": "marib-raiders",
+            "name": "Marib Raiders",
+            "region": "Gulf of Aden",
+            "sponsor": "independent",
+            "capability": 25,
+            "radicalization": 50,
+            "autonomy": 80
+        },
+        {
+            "id": "bab-el-mandeb-co",
+            "name": "Bab el-Mandeb Co.",
+            "region": "Bab el-Mandeb strait",
+            "sponsor": "independent",
+            "capability": 20,
+            "radicalization": 40,
+            "autonomy": 60
+        }
+    ],
+    "alliances": []
+}

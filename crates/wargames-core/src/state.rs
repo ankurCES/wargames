@@ -1,11 +1,13 @@
 //! World state model.
 
+use crate::proxies::{Alliance, TerrorActor};
 use serde::{Deserialize, Serialize};
 
 /// Two superpowers in the original WOPR scenario. The country picker in the
 /// TUI may extend this to other pairs (`NATO` vs `PRC`, etc.) but the core
 /// engine currently models a bipolar standoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Side {
     Us,
     Opp,
@@ -193,6 +195,15 @@ pub struct WorldState {
     pub sides: [SideState; 2],
     pub log: Vec<crate::log::LogEntry>,
     pub terminal: Option<crate::engine::GameOutcome>,
+    /// Non-state actors (terror groups, insurgencies, PMCs) on the
+    /// world stage. Defaults to empty so legacy scenarios without
+    /// `terror_actors` still load and play.
+    #[serde(default)]
+    pub terror_actors: Vec<TerrorActor>,
+    /// Bilateral alliances (treaties, proxy sponsorships, rivalries).
+    /// Defaults to empty for backward-compat with legacy scenarios.
+    #[serde(default)]
+    pub alliances: Vec<Alliance>,
 }
 
 impl WorldState {

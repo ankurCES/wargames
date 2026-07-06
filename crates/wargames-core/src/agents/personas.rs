@@ -230,6 +230,8 @@ mod tests {
             sides: [SideState::default_player(), SideState::default_opponent()],
             log: vec![],
             terminal: None,
+            terror_actors: vec![],
+            alliances: vec![],
         }
     }
 

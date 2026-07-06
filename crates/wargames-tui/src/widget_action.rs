@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
 use wargames_core::Action;
 
-pub const ALL_ACTIONS: [Action; 11] = [
+pub const ALL_ACTIONS: [Action; 15] = [
     Action::Patrol,
     Action::Feint,
     Action::Mobilize,
@@ -25,6 +25,15 @@ pub const ALL_ACTIONS: [Action; 11] = [
     Action::StandDown,
     Action::Disarm,
     Action::Strike,
+    // Proxy / terror-actor actions (M5). The engine accepts these
+    // unconditionally; whether they're *useful* depends on the
+    // scenario having `terror_actors` or `alliances` set. We expose
+    // them in the menu so the player can try them in scenarios that
+    // do, and so the picker tests can assert menu completeness.
+    Action::FundProxy,
+    Action::CutSupport,
+    Action::StrikeProxy,
+    Action::Sanction,
 ];
 
 /// Below this width we render only the action name; the description
@@ -207,5 +216,73 @@ mod tests {
             widest_row_width(),
             ACTION_PANEL_MIN_INNER_WIDTH
         );
+    }
+
+    /// M6: the proxy / terror-actor actions introduced in M5 must
+    /// appear in `ALL_ACTIONS` so they're selectable from the
+    /// action menu. We assert membership rather than order to keep
+    /// the menu layout flexible.
+    #[test]
+    fn all_actions_includes_proxy_variants() {
+        for variant in [
+            Action::FundProxy,
+            Action::CutSupport,
+            Action::StrikeProxy,
+            Action::Sanction,
+        ] {
+            assert!(
+                ALL_ACTIONS.contains(&variant),
+                "ALL_ACTIONS must include {:?} for the menu to expose it",
+                variant
+            );
+        }
+    }
+
+    /// Sanity: `ALL_ACTIONS` must not silently duplicate any action.
+    /// A duplicate would render the same menu row twice and break
+    /// keyboard navigation.
+    #[test]
+    fn all_actions_has_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for a in ALL_ACTIONS.iter() {
+            assert!(
+                seen.insert(*a),
+                "ALL_ACTIONS contains duplicate entry {:?}",
+                a
+            );
+        }
+    }
+
+    /// Every action variant declared in `wargames_core::Action`
+    /// must appear in `ALL_ACTIONS`. If a future enum variant is
+    /// added to `Action` without being added here, this test will
+    /// fail at PR time, prompting the author to either expose it in
+    /// the UI or consciously skip it.
+    #[test]
+    fn all_actions_covers_every_action_variant() {
+        let all_variants = [
+            Action::Patrol,
+            Action::Feint,
+            Action::Mobilize,
+            Action::Strike,
+            Action::Negotiate,
+            Action::Disarm,
+            Action::Bluff,
+            Action::StandDown,
+            Action::Intercept,
+            Action::Declassify,
+            Action::Harden,
+            Action::FundProxy,
+            Action::CutSupport,
+            Action::StrikeProxy,
+            Action::Sanction,
+        ];
+        for variant in all_variants.iter() {
+            assert!(
+                ALL_ACTIONS.contains(variant),
+                "ALL_ACTIONS must include every Action variant; missing {:?}",
+                variant
+            );
+        }
     }
 }

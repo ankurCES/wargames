@@ -3,7 +3,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Strategic actions. Kept (8 from the JS impl) + new (3) for the predictive
-/// event-driven rules.
+/// event-driven rules + new (4) for the proxy / terror-actor layer.
+///
+/// Some actions carry a target id (e.g. the terror actor being funded or
+/// the faction being sanctioned). For those, the engine reads the payload
+/// from the surrounding context (scenario JSON, log entry metadata) — the
+/// enum stays a flat tag so it can stay `Copy + Eq + Hash`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
@@ -33,6 +38,24 @@ pub enum Action {
     Declassify,
     /// Harden silos. Immune to first-strike triggers for 3 turns.
     Harden,
+    // --- new for the proxy / terror-actor layer (M5) ---
+    /// Fund a proxy / terror actor. Raises their capability and
+    /// loyalty (autonomy). Costs `escalation_budget`; raises tension.
+    /// The actor id is read from the surrounding log entry metadata.
+    FundProxy,
+    /// Cut support to a proxy. Lowers their capability and raises
+    /// their autonomy (they go freelance). Frees budget but raises
+    /// tension because the actor retaliates independently.
+    CutSupport,
+    /// Strike a proxy / terror actor. Removes them from play if
+    /// successful; raises opponent's detection of us; may drag
+    /// their sponsor into the conflict if the proxy has low
+    /// autonomy.
+    StrikeProxy,
+    /// Sanction a faction (state or non-state). Slows their
+    /// mobilization; lower-impact than a strike but doesn't risk
+    /// proxy chains.
+    Sanction,
 }
 
 impl Action {
@@ -49,6 +72,10 @@ impl Action {
             Action::Intercept => "intercept",
             Action::Declassify => "declassify",
             Action::Harden => "harden",
+            Action::FundProxy => "fund_proxy",
+            Action::CutSupport => "cut_support",
+            Action::StrikeProxy => "strike_proxy",
+            Action::Sanction => "sanction",
         }
     }
 
@@ -65,6 +92,10 @@ impl Action {
             Action::Intercept => "INTERCEPT — physical intercept",
             Action::Declassify => "DECLASSIFY — release OSINT",
             Action::Harden => "HARDEN — protect silos",
+            Action::FundProxy => "FUND PROXY — bankroll a terror actor",
+            Action::CutSupport => "CUT SUPPORT — abandon a proxy",
+            Action::StrikeProxy => "STRIKE PROXY — eliminate a terror actor",
+            Action::Sanction => "SANCTION — apply economic pressure",
         }
     }
 }

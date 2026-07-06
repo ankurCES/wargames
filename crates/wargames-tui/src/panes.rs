@@ -203,22 +203,45 @@ pub fn game_layout(area: Rect) -> GameRects {
     let body = vertical[0];
 
     if matches!(breakpoint, Breakpoint::Compact) {
-        // Single column. Top: tabs strip + active pane. Bottom: log +
-        // action strip. Total minimum: 1 (tabs) + 4 (pane) + 4 (log)
-        // + 3 (action) = 12 rows of body plus 1 of status.
+        // Side-by-side layout: top row is [tabs | horizontal split
+        // of (active pane | event log)]; bottom is the full-width
+        // action strip. The user wanted the cycling pane and the
+        // log visible at the same time so the truncated opp message
+        // at the bottom (now also streamed into the log) isn't the
+        // only way to read it.
+        //
+        // Min heights: 1 (tabs) + 4 (top row) + 3 (action) = 8 rows
+        // of body plus 1 of status.
         let compact_v = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),  // tabs
-                Constraint::Min(4),    // active pane
-                Constraint::Length(4), // log strip
+                Constraint::Min(4),    // top row: pane + log
                 Constraint::Length(3), // action strip
             ])
             .split(body);
         let tabs = compact_v[0];
-        let left = compact_v[1];
-        let log = compact_v[2];
-        let action = compact_v[3];
+        let top_area = compact_v[1];
+        let action = compact_v[2];
+        // Width split inside the top row — log gets ~40% with a
+        // floor of 24 cells so the cycling pane stays legible.
+        let log_min: u16 = 24;
+        let log_width = if top_area.width * 2 / 5 >= log_min {
+            top_area.width * 2 / 5
+        } else if top_area.width >= log_min + 1 {
+            log_min
+        } else {
+            top_area.width / 2
+        };
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(log_width),
+            ])
+            .split(top_area);
+        let left = cols[0];
+        let log = cols[1];
         return GameRects {
             breakpoint,
             body,
@@ -413,10 +436,70 @@ mod tests {
         }
         // Tabs strip is only present in Compact.
         assert!(r.tabs.height >= 1);
-        // Log is in the column (full width) at Compact.
+        // Log and cycling pane sit side-by-side in Compact now
+        // (was vertical-stack before). Log must be to the right
+        // of the cycling pane with both having non-zero width.
         assert!(r.log.width > 0);
-        // Action strip is present.
+        assert!(r.left.width > 0);
+        assert!(
+            r.left.x + r.left.width <= r.log.x,
+            "Compact log must start at or after the cycling pane ends \
+             (left.x+left.width={}, log.x={})",
+            r.left.x + r.left.width,
+            r.log.x
+        );
+        // Action strip is present and spans full body width.
         assert!(r.action.width > 0);
+        assert_eq!(r.action.width, r.body.width);
+    }
+
+    #[test]
+    fn game_layout_compact_log_and_left_are_side_by_side() {
+        // The user-visible guarantee: in Compact, the cycling pane
+        // and the event log share the same row band (no log-only
+        // vertical strip between them and the action panel).
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 24,
+        };
+        let r = game_layout(area);
+        assert_eq!(r.breakpoint, Breakpoint::Compact);
+        // Same vertical band — their y ranges overlap fully.
+        assert_eq!(r.left.y, r.log.y);
+        assert_eq!(r.left.height, r.log.height);
+        // Log starts strictly after the cycling pane — they're
+        // side-by-side, not overlapping.
+        assert!(r.log.x >= r.left.x + r.left.width);
+        // Action strip sits below both of them at full body width.
+        assert!(r.action.y >= r.left.y + r.left.height);
+        assert_eq!(r.action.width, r.body.width);
+    }
+
+    #[test]
+    fn game_layout_compact_handles_narrow_terminal_without_panic() {
+        // 60×18 is the canonical Compact size used in the other tests
+        // — verify the new horizontal split doesn't push panes off
+        // the right edge when the log floor (24 cells) would over-
+        // flow the available width.
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 18,
+        };
+        let r = game_layout(area);
+        assert_eq!(r.breakpoint, Breakpoint::Compact);
+        // Every rect must still fit within the area.
+        for pane in [r.body, r.left, r.log, r.action, r.tabs] {
+            assert!(pane.x + pane.width <= area.width);
+            assert!(pane.y + pane.height <= area.height);
+        }
+        // Both halves still visible (zero width would be a regression
+        // from the old vertical-stack).
+        assert!(r.left.width > 0);
+        assert!(r.log.width > 0);
     }
 
     #[test]

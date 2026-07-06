@@ -70,6 +70,9 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
         let kind_color = match entry.kind.as_str() {
             "trigger" => theme.log_trigger,
             "outcome" => theme.log_outcome,
+            // Comm rows are coloured by side (opp/soviet/terror/...)
+            // — they're transcripts, not neutral world events.
+            "comm" => color,
             _ => color,
         };
         let header = format!(
@@ -79,17 +82,73 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
         let header_style = Style::default().fg(kind_color);
 
         let wrapped = wrap_to_width(&entry.message, msg_width);
+        // Comm rows use the side color for the message itself so
+        // it reads as a voice, not a passive log line. Other
+        // kinds stay in the neutral log_text color.
+        let msg_color = if entry.kind == "comm" {
+            kind_color
+        } else {
+            theme.log_text
+        };
         for (i, msg_line) in wrapped.iter().enumerate() {
-            let lead: Vec<Span<'static>> = if i == 0 {
-                vec![Span::styled(header.clone(), header_style)]
+            let is_first = i == 0;
+            let is_rtl_comm = is_first
+                && entry.kind == "comm"
+                && entry.language.is_rtl();
+            let is_ltr_comm = is_first
+                && entry.kind == "comm"
+                && !entry.language.is_rtl();
+            let mut row: Vec<Span<'static>> = if is_first {
+                let mut spans = vec![Span::styled(header.clone(), header_style)];
+                // LTR comm: "[  1] opp   comm    ▸ мы готовимся"
+                // RTL comm: "[  1] opp   comm    мы готовимся ◂"
+                // (trailing-edge marker so visual flow reads
+                // right-to-left in the terminal.)
+                if is_ltr_comm {
+                    spans.push(Span::styled(
+                        " \u{25B8} ",
+                        Style::default()
+                            .fg(kind_color)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    spans.push(Span::styled(
+                        msg_line.clone(),
+                        Style::default().fg(msg_color),
+                    ));
+                } else if is_rtl_comm {
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        msg_line.clone(),
+                        Style::default().fg(msg_color),
+                    ));
+                    spans.push(Span::styled(
+                        " \u{25C2}",
+                        Style::default()
+                            .fg(kind_color)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                } else {
+                    // Trigger / outcome / action rows get a single
+                    // space between the header and the message.
+                    spans.push(Span::raw(" "));
+                    spans.push(Span::styled(
+                        msg_line.clone(),
+                        Style::default().fg(msg_color),
+                    ));
+                }
+                spans
             } else {
-                vec![Span::raw(" ".repeat(PREFIX_CELLS))]
+                // Continuation rows are blank-prefixed so the
+                // wrapped text aligns with the first row's
+                // message column.
+                let mut spans =
+                    vec![Span::raw(" ".repeat(PREFIX_CELLS))];
+                spans.push(Span::styled(
+                    msg_line.clone(),
+                    Style::default().fg(msg_color),
+                ));
+                spans
             };
-            let mut row = lead;
-            row.push(Span::styled(
-                msg_line.clone(),
-                Style::default().fg(theme.log_text),
-            ));
             lines.push(Line::from(row));
         }
     }
@@ -146,6 +205,7 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wargames_core::language::Language;
     use wargames_core::log::LogEntry;
 
     fn entry(turn: u32, msg: &str) -> LogEntry {
@@ -153,8 +213,170 @@ mod tests {
             turn,
             side: "opp".into(),
             kind: "outcome".into(),
+            language: Language::English,
             message: msg.into(),
         }
+    }
+
+    fn comm_entry(turn: u32, msg: &str, lang: Language) -> LogEntry {
+        LogEntry::comm_with_lang(turn, "opp", lang, msg)
+    }
+
+    /// Comm rows tagged RTL must place the directional marker
+    /// (`◂`) at the trailing edge of the message, and must not
+    /// place a leading `▸`. Verifies the row's rendered spans
+    /// contain both the message and the trailing marker, in the
+    /// expected order.
+    #[test]
+    fn rtl_comm_row_places_trailing_arrow() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let msg = "الاستعدادات جارية";
+        let log = vec![comm_entry(1, msg, Language::Arabic)];
+        terminal
+            .draw(|f| render(f, f.area(), &log, 0))
+            .expect("RTL comm render must not panic");
+        let buf = terminal.backend().buffer().clone();
+        // Walk every cell of the first non-empty row and reconstruct
+        // the text. The expected ordering is: header, message, then
+        // trailing `◂` — so the message text must appear before the
+        // arrow char in the rendered span sequence.
+        let mut row_text = String::new();
+        let mut arrow_seen_after_message = false;
+        let mut message_seen = false;
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                line.push_str(cell.symbol());
+            }
+            let trimmed = line.trim_end();
+            if trimmed.contains(msg) {
+                row_text = trimmed.to_string();
+                // Find the position of the message and the arrow.
+                let msg_pos = row_text.find(msg).expect("message found");
+                if let Some(arrow_pos) =
+                    row_text.find('\u{25C2}')
+                {
+                    message_seen = true;
+                    arrow_seen_after_message =
+                        arrow_pos > msg_pos + msg.len();
+                }
+                break;
+            }
+        }
+        assert!(
+            message_seen,
+            "RTL message text must appear in the rendered buffer, got: {row_text:?}"
+        );
+        assert!(
+            arrow_seen_after_message,
+            "RTL comm row must have trailing `◂` after the message, got: {row_text:?}"
+        );
+    }
+
+    /// Walk every cell of the rendered buffer in row-major order
+    /// and concatenate `cell.symbol()`. Used by the non-Latin /
+    /// RTL tests below to assert that the message text appears
+    /// contiguously somewhere in the output. CJK characters render
+    /// as a single `TestBackend` cell even though they occupy two
+    /// terminal columns, so a substring match on the joined string
+    /// is correct for both narrow (ASCII) and wide (CJK) scripts.
+    fn buffer_to_string(buf: &ratatui::buffer::Buffer) -> String {
+        let mut s = String::with_capacity(
+            (buf.area.width as usize) * (buf.area.height as usize),
+        );
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+        }
+        s
+    }
+
+    /// Non-Latin scripts (Cyrillic, CJK, Hangul) render as
+    /// unicode through the existing pipeline — verify the message
+    /// survives byte-by-byte and is visible somewhere in the
+    /// rendered buffer, with no panic.
+    #[test]
+    fn non_latin_scripts_render_without_panic() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let messages = [
+            ("мы готовы", Language::Russian),
+            ("我们准备好了", Language::Mandarin),
+            ("준비 완료", Language::Korean),
+            ("מוכנים", Language::Hebrew),
+        ];
+        let log: Vec<LogEntry> = messages
+            .iter()
+            .enumerate()
+            .map(|(i, (m, lang))| comm_entry(i as u32 + 1, m, *lang))
+            .collect();
+        terminal
+            .draw(|f| render(f, f.area(), &log, 0))
+            .expect("non-Latin comm render must not panic");
+        let buf = terminal.backend().buffer().clone();
+        let s = buffer_to_string(&buf);
+        // TestBackend writes each wide (CJK / Hangul) character as
+        // a single cell without doubling the symbol, then visually
+        // pads with an ASCII space on the right — so the buffer
+        // string ends up looking like "我 们 准 备 好 了" rather
+        // than "我们准备好了". Real terminals display these as
+        // contiguous wide glyphs; for the test we just need every
+        // character to be present in order. Strip ASCII spaces
+        // before matching.
+        let s_compact: String = s.chars().filter(|c| *c != ' ').collect();
+        for (msg, lang) in messages {
+            let msg_compact: String =
+                msg.chars().filter(|c| *c != ' ').collect();
+            assert!(
+                s_compact.contains(&msg_compact),
+                "script {msg:?} ({lang:?}) must appear in rendered buffer (chars in order); first 800 chars of buffer:\n{:?}",
+                &s[..s.len().min(800)]
+            );
+        }
+    }
+
+    /// LTR comm rows still get a leading `▸` arrow. Regression
+    /// guard: making the RTL flip must not break the default case.
+    #[test]
+    fn ltr_comm_row_places_leading_arrow() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let log = vec![comm_entry(1, "we are ready", Language::English)];
+        terminal
+            .draw(|f| render(f, f.area(), &log, 0))
+            .expect("LTR comm render must not panic");
+        let buf = terminal.backend().buffer().clone();
+        let s = buffer_to_string(&buf);
+        let arrow_pos = s.find('\u{25B8}').expect("LTR leading arrow");
+        let msg_pos = s.find("we are ready").expect("LTR message");
+        assert!(
+            arrow_pos < msg_pos,
+            "LTR `▸` must come before the message in rendered buffer, got arrow={arrow_pos} msg={msg_pos}"
+        );
     }
 
     #[test]

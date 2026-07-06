@@ -192,6 +192,34 @@ let rt = Runtime::new().expect("tokio runtime");
         loop {
             match rx.try_recv() {
                 Ok(LlmResult::Delta(text)) => {
+                    // First delta this turn — push a placeholder comm
+                    // entry into the log so the user sees the
+                    // transcript grow live. Subsequent deltas edit
+                    // that same entry in place by index.
+                    if app.streaming_comm_idx.is_none() {
+                        if let Some(w) = app.world.as_mut() {
+                            let turn = w.turn;
+                            w.log.push(wargames_core::log::LogEntry::comm(
+                                turn,
+                                "opp",
+                                "",
+                            ));
+                            app.streaming_comm_idx = Some(w.log.len() - 1);
+                        }
+                    }
+                    if let Some(idx) = app.streaming_comm_idx {
+                        if let Some(w) = app.world.as_mut() {
+                            if let Some(entry) = w.log.get_mut(idx) {
+                                entry.message.push_str(&text);
+                                // Trim so a runaway stream doesn't grow
+                                // the log row without bound.
+                                if entry.message.len() > 256 {
+                                    let drop = entry.message.len() - 256;
+                                    entry.message.drain(..drop);
+                                }
+                            }
+                        }
+                    }
                     app.streaming_message.push_str(&text);
                     // Trim so the live buffer doesn't grow without bound.
                     if app.streaming_message.len() > 256 {
@@ -208,6 +236,10 @@ let rt = Runtime::new().expect("tokio runtime");
                     app.set_idle();
                     app.apply_opponent_action(&action, &message);
                     app.opponent_pending = false;
+                    // apply_opponent_action consumes the streaming
+                    // placeholder internally; ensure the field is
+                    // cleared here too as a safety net.
+                    app.streaming_comm_idx = None;
                 }
                 Ok(LlmResult::Err(e)) => {
                     app.set_idle();
@@ -217,6 +249,7 @@ let rt = Runtime::new().expect("tokio runtime");
                     );
                     let _ = app.apply_heuristic_opponent();
                     app.opponent_pending = false;
+                    app.streaming_comm_idx = None;
                 }
                 Err(_) => break,
             }
@@ -227,6 +260,7 @@ let rt = Runtime::new().expect("tokio runtime");
                 app.set_llm_busy();
                 // Reset streaming buffers for this turn.
                 app.streaming_message.clear();
+                app.streaming_comm_idx = None;
                 app.streaming_action = None;
                 let tx_done = tx.clone();
                 rt.spawn(async move {

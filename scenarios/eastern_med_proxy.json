@@ -1,0 +1,64 @@
+{
+    "id": "eastern_med_proxy",
+    "title": "Eastern Mediterranean, Proxy War",
+    "briefing": "DEFCON 4. Two non-state actors patrol the Eastern Mediterranean — the Crescent Falcons (Opp-sponsored) and the Dawn Volunteers (US-sponsored). Both great powers can fund their proxies, sanction the other, or strike. Tension is driven by proxy autonomy and radicalization. Choose whether escalation runs through your proxy or against theirs.",
+    "initial_state": "DEFCON_4",
+    "initial_detection_pct": 45,
+    "data_sources": ["open_sky", "osint_news"],
+    "faction": "us",
+    "era": "modern",
+    "gdelt_query": "\"Eastern Mediterranean\" OR Cyprus OR Lebanon OR proxy OR militia",
+    "open_sky_bbox": [33, 37, 33, 36],
+    "feed_interval_ms": 60000,
+    "ship_tracks": [
+        { "name": "USS Mount W",  "hull": "command",   "kind": "us",     "speed_kn": 20 },
+        { "name": "RFN Admiral K","hull": "frigate",   "kind": "soviet", "speed_kn": 24 }
+    ],
+    "us": {
+        "carriersOperational": 2,
+        "silosReady": 100,
+        "escalation_budget": 50
+    },
+    "soviet": {
+        "subsAtSea": 4,
+        "silosReady": 100,
+        "escalation_budget": 50
+    },
+    "map": {
+        "center": [35, 34],
+        "zoom": 5
+    },
+    "opening_message": "Two rival proxies are active in theater: Crescent Falcons (Opp-sponsored) and Dawn Volunteers (US-sponsored). Fund, sanction, or strike — each choice shifts the proxy balance.",
+    "win_conditions": {
+        "disarm": "Cut support to your proxy AND reduce DEFCON to ≤ 3.",
+        "defeat_strike": "Either side launches first.",
+        "mutual_assured_destruction": "A freelance strike by an unsponsored proxy drags both patrons in within 2 turns."
+    },
+    "terror_actors": [
+        {
+            "id": "crescent-falcons",
+            "name": "Crescent Falcons",
+            "region": "Eastern Mediterranean",
+            "sponsor": "opp",
+            "capability": 45,
+            "radicalization": 35,
+            "autonomy": 40
+        },
+        {
+            "id": "dawn-volunteers",
+            "name": "Dawn Volunteers",
+            "region": "Eastern Mediterranean",
+            "sponsor": "us",
+            "capability": 40,
+            "radicalization": 30,
+            "autonomy": 45
+        }
+    ],
+    "alliances": [
+        {
+            "sides": ["us", "opp"],
+            "kind": "rivalry",
+            "strength": 90
+        }
+    ]
+}
