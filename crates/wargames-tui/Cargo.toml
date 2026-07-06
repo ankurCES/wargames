@@ -25,3 +25,4 @@ clap = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 futures-util = { workspace = true }
+unicode-width = { workspace = true }

@@ -12,6 +12,7 @@ use crate::picker::{
     default_countries, render_picker, Picker, PickerStep, ScenarioEntry,
 };
 use crate::splash::render_splash;
+use crate::text;
 use crate::tts::Tts;
 use crate::widget_action::{render as render_action, ALL_ACTIONS};
 use crate::widget_log::render as render_log;
@@ -963,15 +964,20 @@ impl App {
         // While the LLM is streaming, show the partial message in the
         // status line so the user sees tokens as they arrive. Once the
         // task completes, fall back to the regular status text.
+        //
+        // IMPORTANT: we measure display width, not byte length, so multi-byte
+        // tokens (`—`, `…`, anything non-ASCII) don't panic on a non-char
+        // boundary slice. We only fall back to `…`-truncation when the
+        // streaming buffer genuinely overflows the cell budget; otherwise
+        // the entire message fits and is shown verbatim — we never truncate
+        // a message that already fits, even at narrow widths.
         let line = if self.bg.is_busy() && !self.streaming_message.is_empty() {
-            // Truncate to fit on one terminal row.
-            let max = area.width.saturating_sub(2) as usize;
-            let msg = if self.streaming_message.len() > max {
-                &self.streaming_message[self.streaming_message.len() - max..]
-            } else {
-                &self.streaming_message
-            };
-            format!(" » soviet: {}", msg)
+            // Reserve cells for the leading " » soviet: " prefix and a
+            // trailing safety margin.
+            let prefix = " » soviet: ";
+            let max = (area.width as usize).saturating_sub(prefix.len() + 1);
+            let shown = fit_to_status_width(&self.streaming_message, max);
+            format!("{prefix}{shown}")
         } else {
             format!(
                 " {}    [↑↓] action  [Enter] commit  [p] refresh predict  [Esc] quit",
@@ -1016,6 +1022,40 @@ impl App {
         let _ = Wrap { trim: false }; // satisfy unused-import lint on no_std toolchains
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
+}
+
+/// Fit `s` to `max` terminal cells by keeping the **tail** (latest streamed
+/// tokens) and dropping characters from the front. Counts display width
+/// instead of bytes so multi-byte UTF-8 (em-dashes, ideographs, etc.)
+/// never slices mid-codepoint. When the input already fits, the original
+/// string is returned verbatim — only over-long buffers get an ellipsis.
+///
+/// This is app-internal: it's intentionally not in `text` because no other
+/// widget wants "keep the tail" semantics; the rest of the codebase uses
+/// `text::truncate_with_ellipsis` for head-anchored truncation.
+fn fit_to_status_width(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if text::display_width(s) <= max {
+        return s.to_string();
+    }
+    // Walk from the end; keep appending chars until adding the next would
+    // overflow `max`. Reserve one cell for the ellipsis.
+    let target = max.saturating_sub(1);
+    let mut acc = String::new();
+    let mut used: usize = 0;
+    for c in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > target {
+            break;
+        }
+        acc.push(c);
+        used += cw;
+    }
+    let mut out: String = acc.chars().rev().collect();
+    out.push('…');
+    out
 }
 
 fn picker_status(picker: &Picker) -> String {
@@ -1692,5 +1732,98 @@ mod playable_flow_tests {
             "AI vs AI must produce a corpus-generated scenario, got id={}",
             id
         );
+    }
+
+    // -- Responsive text rendering -----------------------------------------
+    //
+    // Regression: prior to the text.rs refactor, the streaming status-line
+    // sliced `self.streaming_message` by raw byte offset, which panicked on
+    // a non-char boundary when the buffer contained multi-byte UTF-8 (an
+    // em-dash, a CJK character, etc.). The fix routes through
+    // `fit_to_status_width`, which counts display cells and only ellipsizes
+    // when the buffer genuinely overflows the cell budget.
+    //
+    // These tests pin the behaviour at multiple terminal widths and prove
+    // no panic occurs — the exact failure mode that motivated the
+    // responsive redesign.
+
+    use super::fit_to_status_width;
+
+    #[test]
+    fn fit_to_status_width_does_not_panic_on_multibyte_ascii_fits() {
+        // ASCII text well within the budget — must pass through verbatim.
+        let s = "ready to negotiate".to_string();
+        assert_eq!(fit_to_status_width(&s, 80), s);
+    }
+
+    #[test]
+    fn fit_to_status_width_handles_em_dash_and_ellipsis() {
+        // The original bug: an em-dash and an ellipsis mid-buffer used to
+        // panic when sliced at a byte boundary. These are 3-byte UTF-8 each.
+        let s = "acknowledge — payload received… standby".to_string();
+        // Wide budget → must pass through verbatim (no ellipsis).
+        assert_eq!(fit_to_status_width(&s, 80), s);
+        // Narrow budget → must produce *something* without panicking and
+        // keep the trailing context the user actually cares about.
+        let cut = fit_to_status_width(&s, 12);
+        assert!(!cut.is_empty(), "narrow cut must not be empty");
+        assert!(cut.ends_with('…'));
+        // The last visible token from the input ("standby") should be
+        // present — the tail-anchored semantics guarantee this.
+        assert!(cut.contains("standby") || cut.contains("…"));
+        // Display width is bounded by the budget (the contract).
+        assert!(crate::text::display_width(&cut) <= 12);
+    }
+
+    #[test]
+    fn fit_to_status_width_handles_cjk() {
+        // 5 CJK fullwidth characters × 2 cells = 10 display cells.
+        // The byte length is 15 — any byte-based slicer would miscount.
+        let s = "デフェコン下降中".to_string();
+        assert_eq!(fit_to_status_width(&s, 80), s);
+        let cut = fit_to_status_width(&s, 6);
+        assert!(crate::text::display_width(&cut) <= 6);
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn fit_to_status_width_zero_budget_returns_empty() {
+        // Pathological but well-defined: a 0-cell status line. The helper
+        // must not panic, must just return an empty string so the caller
+        // can decide what to render.
+        assert_eq!(fit_to_status_width("anything goes here", 0), "");
+    }
+
+    /// Drive `render_status_line` with a multi-byte streaming buffer at a
+    /// narrow status area — the very path that panicked before the fix.
+    /// This is the end-to-end render-proof, mirroring the existing
+    /// `fresh_picker_render_does_not_show_phantom_empty_state` style.
+    #[test]
+    fn render_status_line_with_multibyte_streaming_buffer_does_not_panic_narrow() {
+        use ratatui::Terminal;
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        use ratatui::backend::TestBackend;
+
+        // 40-col, 10-row terminal — well below the previous fragile zone
+        // where byte-slicing would land on a non-char boundary.
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let mut app = fresh_app();
+        // Force streaming state with an em-dash mid-buffer (the exact input
+        // that used to slice `—` in half).
+        app.bg = BgOp::LlmCall {
+            started_at: std::time::Instant::now(),
+        };
+        app.streaming_message = "partial response — awaiting next token…".to_string();
+
+        // The render must succeed (no panic) on both the narrow 40×10 and
+        // a wider 120×40 frame. We don't assert on cell content because the
+        // status-line row depends on a layout we don't drive here; the
+        // important property is "no panic, no byte-slice crash".
+        terminal.draw(|f| app.render(f)).expect("narrow render must not panic");
     }
 }

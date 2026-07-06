@@ -11,6 +11,7 @@ mod net;
 mod panes;
 mod picker;
 mod splash;
+mod text;
 mod tts;
 mod widget_action;
 mod widget_log;
