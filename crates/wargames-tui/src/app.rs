@@ -16,7 +16,7 @@ use crate::text;
 use crate::theme;
 use crate::tts::Tts;
 use crate::widget_action::{render as render_action, ALL_ACTIONS};
-use crate::widget_log::render as render_log;
+use crate::widget_log::{self, render as render_log};
 use crate::widget_predict::render as render_predict;
 use crate::widget_radar::{self, render as render_radar, Contact};
 use crate::widget_spinner;
@@ -1552,7 +1552,12 @@ impl App {
         // Cache the visible window height so PageUp/PageDown can
         // translate "viewport rows" into scroll units.
         self.log_view_height = r.log.height;
-        render_log(frame, r.log, &log, self.log_scroll);
+        // Both Compact and grid layouts split the body into a
+        // cycling pane on the left and the event log on the right
+        // (side-by-side). Render the log in reverse-chronological
+        // mode so the most recent event sits at the top of the
+        // pane — the user always sees the latest without scrolling.
+        render_log(frame, r.log, &log, self.log_scroll, widget_log::LogMode::Reverse);
         // Action strip — full-width in Medium/Wide, sits at the
         // bottom of the Compact body too.
         render_action(frame, r.action, &mut self.action_list);
@@ -1595,7 +1600,10 @@ impl App {
             .map(|w| w.log.clone())
             .unwrap_or_default();
         self.log_view_height = r.log.height;
-        render_log(frame, r.log, &log, self.log_scroll);
+        // Same reverse-chronological layout as compact — this is a
+        // side-by-side split (left + log on top of the action
+        // strip). Latest event stays on top.
+        render_log(frame, r.log, &log, self.log_scroll, widget_log::LogMode::Reverse);
         // Action strip — full width at the bottom.
         render_action(frame, r.action, &mut self.action_list);
         self.render_status_line(frame);

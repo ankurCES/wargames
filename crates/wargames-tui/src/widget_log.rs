@@ -11,7 +11,34 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 use wargames_core::log::LogEntry;
 
-pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
+/// How the log is laid out within its pane.
+///
+/// `Default` keeps the canonical top-to-bottom flow: oldest at the
+/// top, newest at the bottom (matches a file `tail -f` style view).
+/// `Reverse` is the inverse — newest at the top, oldest at the
+/// bottom. The side-by-side split layouts use `Reverse` so the
+/// user always sees the latest event without needing to scroll
+/// every time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogMode {
+    #[default]
+    Default,
+    Reverse,
+}
+
+impl LogMode {
+    fn is_reverse(self) -> bool {
+        matches!(self, LogMode::Reverse)
+    }
+}
+
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    log: &[LogEntry],
+    scroll: u16,
+    mode: LogMode,
+) {
     let theme = theme::current();
     let block = Block::default()
         .borders(Borders::ALL)
@@ -153,6 +180,18 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
         }
     }
 
+    // Optional reverse-chronological rendering for the side-by-side
+    // split layouts: build lines in canonical order (oldest first,
+    // newest last) as the wrapping code expects, then flip them so
+    // the newest entry lands at the top of the pane and the user
+    // sees the latest event without scrolling. The scroll offset
+    // then measures "rows down from the head of the rendered slice"
+    // — which equals "how many older rows are above the newest" in
+    // reverse mode.
+    if mode.is_reverse() && !lines.is_empty() {
+        lines.reverse();
+    }
+
     // Apply scroll: clamp `scroll` so the user can't paginate past the
     // top (negative) or past the bottom (leave at least `height` rows
     // visible at all times).
@@ -241,7 +280,7 @@ mod tests {
         let msg = "الاستعدادات جارية";
         let log = vec![comm_entry(1, msg, Language::Arabic)];
         terminal
-            .draw(|f| render(f, f.area(), &log, 0))
+            .draw(|f| render(f, f.area(), &log, 0, LogMode::Default))
             .expect("RTL comm render must not panic");
         let buf = terminal.backend().buffer().clone();
         // Walk every cell of the first non-empty row and reconstruct
@@ -328,7 +367,7 @@ mod tests {
             .map(|(i, (m, lang))| comm_entry(i as u32 + 1, m, *lang))
             .collect();
         terminal
-            .draw(|f| render(f, f.area(), &log, 0))
+            .draw(|f| render(f, f.area(), &log, 0, LogMode::Default))
             .expect("non-Latin comm render must not panic");
         let buf = terminal.backend().buffer().clone();
         let s = buffer_to_string(&buf);
@@ -367,7 +406,7 @@ mod tests {
         .expect("TestBackend terminal constructs");
         let log = vec![comm_entry(1, "we are ready", Language::English)];
         terminal
-            .draw(|f| render(f, f.area(), &log, 0))
+            .draw(|f| render(f, f.area(), &log, 0, LogMode::Default))
             .expect("LTR comm render must not panic");
         let buf = terminal.backend().buffer().clone();
         let s = buffer_to_string(&buf);
@@ -429,7 +468,7 @@ mod tests {
             entry(3, "another short one"),
         ];
         terminal
-            .draw(|f| render(f, f.area(), &log, 0))
+            .draw(|f| render(f, f.area(), &log, 0, LogMode::Default))
             .expect("narrow log render must not panic");
     }
 
@@ -453,7 +492,7 @@ mod tests {
             height: 5,
         };
         terminal
-            .draw(|f| render(f, area, &log, 0))
+            .draw(|f| render(f, area, &log, 0, LogMode::Default))
             .expect("ultra-narrow log render must not panic");
     }
 
@@ -482,7 +521,7 @@ mod tests {
             .collect();
         for s in [0u16, 4, 16, 200] {
             terminal
-                .draw(|f| render(f, f.area(), &log, s))
+                .draw(|f| render(f, f.area(), &log, s, LogMode::Default))
                 .unwrap_or_else(|e| panic!("scroll={s} render must not panic: {e}"));
         }
     }
@@ -506,7 +545,7 @@ mod tests {
             .collect();
         // Pass a non-zero scroll so the "earlier row(s)" marker is emitted.
         terminal
-            .draw(|f| render(f, f.area(), &log, 8))
+            .draw(|f| render(f, f.area(), &log, 8, LogMode::Default))
             .expect("scroll-hint render must not panic");
         let buf = terminal.backend().buffer().clone();
         let mut s = String::with_capacity(
@@ -525,5 +564,105 @@ mod tests {
             s.contains("PgUp/PgDn"),
             "scroll hint must keep mentioning PgUp/PgDn for users who prefer page keys, got buffer: {s:?}"
         );
+    }
+
+    /// `LogMode::Reverse` is the contract the side-by-side split
+    /// layouts depend on: the most recently appended log entry must
+    /// appear at the *top* of the rendered pane, with older entries
+    /// below. We verify by putting two uniquely identifiable
+    /// entries into the log, rendering with `LogMode::Reverse`, and
+    /// asserting the newer entry's row index is strictly smaller
+    /// than the older entry's row index in the rendered buffer.
+    ///
+    /// `LogMode::Default` (the historical behaviour) must keep the
+    /// canonical newest-at-bottom ordering — pinned here to catch
+    /// any future "reverse-by-default" regression.
+    #[test]
+    fn reverse_mode_puts_newest_entry_at_the_top() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::{TerminalOptions, Viewport};
+
+        // Build two logs that have unique tokens in distinct
+        // positions. Both modes use the same buffer size so the
+        // geometry is comparable.
+        let older = LogEntry {
+            turn: 1,
+            side: "us".into(),
+            kind: "outcome".into(),
+            language: Language::English,
+            message: "older marker older-zzz".into(),
+        };
+        let newer = LogEntry {
+            turn: 2,
+            side: "opp".into(),
+            kind: "outcome".into(),
+            language: Language::English,
+            message: "newer marker newer-aaa".into(),
+        };
+        let log = vec![older.clone(), newer.clone()];
+
+        // Default mode: older must render above newer.
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        terminal
+            .draw(|f| render(f, f.area(), &log, 0, LogMode::Default))
+            .expect("default render must not panic");
+        let default_buf = terminal.backend().buffer().clone();
+        let default_y_older = find_marker_row(&default_buf, "older marker")
+            .expect("older marker must render in default mode");
+        let default_y_newer = find_marker_row(&default_buf, "newer marker")
+            .expect("newer marker must render in default mode");
+        assert!(
+            default_y_older < default_y_newer,
+            "default mode: older must render above newer (older.y={}, newer.y={})",
+            default_y_older, default_y_newer
+        );
+
+        // Reverse mode: newer must render above older.
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        terminal
+            .draw(|f| render(f, f.area(), &log, 0, LogMode::Reverse))
+            .expect("reverse render must not panic");
+        let reverse_buf = terminal.backend().buffer().clone();
+        let reverse_y_older = find_marker_row(&reverse_buf, "older marker")
+            .expect("older marker must render in reverse mode");
+        let reverse_y_newer = find_marker_row(&reverse_buf, "newer marker")
+            .expect("newer marker must render in reverse mode");
+        assert!(
+            reverse_y_newer < reverse_y_older,
+            "reverse mode: newer must render above older (older.y={}, newer.y={})",
+            reverse_y_older, reverse_y_newer
+        );
+        assert!(
+            default_y_older != reverse_y_older || default_y_newer != reverse_y_newer,
+            "reverse mode must actually swap ordering (default older.y={default_y_older}, newer.y={default_y_newer}; \
+             reverse older.y={reverse_y_older}, newer.y={reverse_y_newer})"
+        );
+    }
+
+    /// Walk every row of the buffer and return the row whose cells
+    /// contain the marker (case-sensitive substring match across
+    /// the row's joined symbols). Returns `None` if the marker
+    /// doesn't appear anywhere — callers distinguish "not rendered"
+    /// from "rendered on row N".
+    fn find_marker_row(buf: &ratatui::buffer::Buffer, marker: &str) -> Option<u16> {
+        for y in 0..buf.area.height {
+            let mut line = String::with_capacity(buf.area.width as usize);
+            for x in 0..buf.area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if line.contains(marker) {
+                return Some(y);
+            }
+        }
+        None
     }
 }
