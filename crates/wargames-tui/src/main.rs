@@ -307,6 +307,8 @@ mod event {
                 crossterm::event::KeyCode::Down => KeyCode::Down,
                 crossterm::event::KeyCode::Enter => KeyCode::Enter,
                 crossterm::event::KeyCode::Esc => KeyCode::Esc,
+                crossterm::event::KeyCode::Tab => KeyCode::Tab,
+                crossterm::event::KeyCode::BackTab => KeyCode::BackTab,
                 crossterm::event::KeyCode::Char(c) => KeyCode::Char(c),
                 _ => KeyCode::Any,
             }),

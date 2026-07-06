@@ -7,7 +7,7 @@
 
 use crate::config::BlumiSettings;
 use crate::llm::LlmClient;
-use crate::panes::game_layout;
+use crate::panes::{game_layout, Breakpoint, GameRects, PaneKind};
 use crate::picker::{
     default_countries, render_picker, Picker, PickerStep, ScenarioEntry,
 };
@@ -17,9 +17,10 @@ use crate::tts::Tts;
 use crate::widget_action::{render as render_action, ALL_ACTIONS};
 use crate::widget_log::render as render_log;
 use crate::widget_predict::render as render_predict;
-use crate::widget_radar::render as render_radar;
+use crate::widget_radar::{self, render as render_radar, Contact};
 use crate::widget_spinner;
 use crate::widget_state::render as render_state;
+use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -127,6 +128,13 @@ pub struct App {
     /// `None` until the SSE stream ends.
     pub streaming_action: Option<String>,
     pub mode: Mode,
+    /// Active pane in Compact mode (cycles Tab/Shift+Tab). Unused at
+    /// Medium/Wide breakpoints where every pane is drawn at once.
+    pub active_pane: PaneKind,
+    /// Live radar contacts, regenerated every turn so the radar pane
+    /// visibly ticks. Empty until the engine has applied the first
+    /// action; the widget renders a friendly empty state in that case.
+    pub contacts: Vec<Contact>,
 }
 
 impl App {
@@ -176,6 +184,8 @@ impl App {
             streaming_message: String::new(),
             streaming_action: None,
             mode: Mode::PlayerVsWorld,
+            active_pane: PaneKind::State,
+            contacts: Vec::new(),
         }
     }
 
@@ -263,6 +273,9 @@ impl App {
         self.scenario_entry = Some(entry.clone());
         self.screen = Screen::Game;
         self.status = format!("engaged — DEFCON {}", self.world.as_ref().unwrap().defcon);
+        // Refresh contacts at game start (turn 1) so the radar pane
+        // already has something to show before the first action.
+        self.refresh_contacts();
     }
 
     /// Dispatcher: route to the right game-entry function based on the
@@ -396,6 +409,7 @@ impl App {
         };
         self.world = Some(world);
         self.scenario = Some(scenario);
+        self.refresh_contacts();
 
         // Two agents, distinct personas, one player-aligned + one
         // opponent-aligned. The picker-driven faction determines which
@@ -565,6 +579,7 @@ impl App {
         );
         if advanced {
             self.refresh_prediction();
+            self.refresh_contacts();
             self.after_step_check_terminal();
         }
         advanced
@@ -682,8 +697,23 @@ impl App {
     }
 
     pub fn handle_game_key(&mut self, code: KeyCode) -> bool {
-        // Block input during background work so the user can't double-fire.
-        if self.bg.is_busy() && !matches!(code, KeyCode::Esc) {
+        // Tab / Shift+Tab cycle the Compact-mode active pane. These work
+        // even in AI vs AI and even during background work — the user
+        // should never be locked out of inspecting a pane by a pending
+        // prediction or LLM call.
+        match code {
+            KeyCode::Tab => {
+                self.active_pane = self.active_pane.next();
+                return false;
+            }
+            KeyCode::BackTab => {
+                self.active_pane = self.active_pane.prev();
+                return false;
+            }
+            _ => {}
+        }
+        // Block non-pane-cycling input during background work.
+        if self.bg.is_busy() {
             return false;
         }
         // In AI vs AI mode the game runs itself — Esc still exits.
@@ -750,6 +780,8 @@ impl App {
         // Mark that the opponent should respond next via the LLM. The actual
         // network call is fired from `main.rs`'s run loop when bg==Idle.
         self.opponent_pending = true;
+        // Refresh live radar contacts for the new turn.
+        self.refresh_contacts();
         // Trigger an initial prediction immediately (cheap, sync).
         self.refresh_prediction();
         // Check for terminal.
@@ -775,6 +807,28 @@ impl App {
         self.last_prediction = Some(p);
         self.last_prediction_at = Some(Instant::now());
         self.bg = BgOp::Idle;
+    }
+
+    /// Regenerate the live radar contacts for the current world turn.
+    /// The roster is deterministic *given the turn*, so the radar
+    /// visibly ticks (different rows on different turns) but stays
+    /// reproducible enough that tests can pin down an exact render.
+    pub fn refresh_contacts(&mut self) {
+        let Some(w) = self.world.as_ref() else {
+            // No world yet — keep the empty roster; the radar widget
+            // draws an empty-state hint.
+            self.contacts.clear();
+            return;
+        };
+        // 5 contacts feels right for the current pane sizing; the
+        // widget truncates with overflow hints if we ever grew this.
+        // The `seed` mixes the world turn with two more recent state
+        // bits so consecutive turns almost always differ — without
+        // changing the deterministic-test invariant.
+        let seed = (w.turn as u64).wrapping_mul(1_000_003)
+            ^ ((w.tension * 100.0) as u64).wrapping_mul(31)
+            ^ (w.defcon as u64).wrapping_mul(7);
+        self.contacts = widget_radar::sample_contacts(seed, 5);
     }
 
     /// Build the user message that goes to the LLM.
@@ -817,6 +871,8 @@ impl App {
         self.opponent_pending = false;
         let w = self.world.as_ref().unwrap().clone();
         self.status = format!("turn {} — opp: {} (\"{}\")", w.turn, action.as_str(), message);
+        // Refresh live radar contacts after the opponent moves.
+        self.refresh_contacts();
         if wargames_core::engine::is_terminal(&w) {
             self.screen = Screen::GameOver;
             self.game_over_message = wargames_core::engine::game_over(&w).map(|o| match o {
@@ -839,6 +895,8 @@ impl App {
         self.world = Some(next);
         self.opponent_pending = false;
         self.status = format!("opp (heuristic): {}", opp_action.as_str());
+        // Refresh live radar contacts after the opponent moves.
+        self.refresh_contacts();
         let w = self.world.as_ref().unwrap().clone();
         if wargames_core::engine::is_terminal(&w) {
             self.screen = Screen::GameOver;
@@ -905,45 +963,50 @@ impl App {
                 }
             }
             Screen::Game => {
-                let (s, p, r, a, l) = game_layout(frame.area());
-                if let Some(world) = &self.world {
-                    render_state(frame, s, world);
+                let rects = game_layout(frame.area());
+                match rects.breakpoint {
+                    Breakpoint::TooSmall => {
+                        // The terminal is too small to render the game
+                        // meaningfully — paint a friendly overlay so the
+                        // user knows why nothing is happening.
+                        self.render_too_small(frame, rects.body);
+                    }
+                    Breakpoint::Compact => {
+                        self.render_compact_game(frame, &rects);
+                    }
+                    Breakpoint::Medium | Breakpoint::Wide => {
+                        self.render_grid_game(frame, &rects);
+                    }
                 }
-                render_predict(frame, p, self.last_prediction);
-                render_radar(frame, r, self.scenario.as_ref());
-                render_action(frame, a, &mut self.action_list);
-                let log: Vec<LogEntry> = self
-                    .world
-                    .as_ref()
-                    .map(|w| w.log.clone())
-                    .unwrap_or_default();
-                render_log(frame, l, &log);
-                self.render_status_line(frame);
-                // Delegate to the shared spinner widget for any busy state
-                // (LlmCall / Predict). Anchored at the bottom-right so it never
-                // covers the action menu.
-                match self.bg {
-                    BgOp::LlmCall { started_at } => {
-                        let area = widget_spinner::bottom_right_rect(frame.area());
-                        widget_spinner::render(
-                            frame,
-                            area,
-                            self.bg.label(),
-                            self.spinner_frame,
-                            started_at,
-                        );
+                // Spinner overlay — only in non-Compact modes. In Compact
+                // the spinner would cover the action menu and the tabs;
+                // the busy state is surfaced inline in the status line.
+                if !matches!(rects.breakpoint, Breakpoint::Compact)
+                    && !matches!(rects.breakpoint, Breakpoint::TooSmall)
+                {
+                    match self.bg {
+                        BgOp::LlmCall { started_at } => {
+                            let area = widget_spinner::bottom_right_rect(frame.area());
+                            widget_spinner::render(
+                                frame,
+                                area,
+                                self.bg.label(),
+                                self.spinner_frame,
+                                started_at,
+                            );
+                        }
+                        BgOp::Predict { started_at } => {
+                            let area = widget_spinner::bottom_right_rect(frame.area());
+                            widget_spinner::render(
+                                frame,
+                                area,
+                                self.bg.label(),
+                                self.spinner_frame,
+                                started_at,
+                            );
+                        }
+                        _ => {}
                     }
-                    BgOp::Predict { started_at } => {
-                        let area = widget_spinner::bottom_right_rect(frame.area());
-                        widget_spinner::render(
-                            frame,
-                            area,
-                            self.bg.label(),
-                            self.spinner_frame,
-                            started_at,
-                        );
-                    }
-                    _ => {}
                 }
             }
             Screen::GameOver => {
@@ -1022,6 +1085,152 @@ impl App {
         let _ = Wrap { trim: false }; // satisfy unused-import lint on no_std toolchains
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
+
+    /// Friendly overlay when the terminal is too small to render the game
+    /// meaningfully. Tells the user the current dimensions and the minimum
+    /// we need (`MIN_WIDTH` × `MIN_HEIGHT`).
+    fn render_too_small(&self, frame: &mut ratatui::Frame, area: Rect) {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+        frame.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(Span::styled(
+                " TERMINAL TOO SMALL ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let min_w = crate::panes::MIN_WIDTH;
+        let min_h = crate::panes::MIN_HEIGHT;
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!(
+                    "current: {}×{} · minimum: {}×{}",
+                    area.width, area.height, min_w, min_h
+                ),
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "enlarge the terminal (or split pane size)",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(Span::styled(
+                "and press any key to continue.",
+                Style::default().fg(Color::Gray),
+            )),
+        ];
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+        frame.render_widget(p, inner);
+    }
+
+    /// Compact (≤80 cols, ≤24 rows) game render — single-column layout
+    /// with a tab strip cycling through the four panels.
+    fn render_compact_game(&mut self, frame: &mut ratatui::Frame, r: &GameRects) {
+        // Tabs strip — always visible so the user can see which pane
+        // they're on and what they can switch to.
+        self.render_pane_tabs(frame, r.tabs);
+        // Active pane.
+        match self.active_pane {
+            PaneKind::State => {
+                if let Some(world) = &self.world {
+                    render_state(frame, r.state, world);
+                }
+            }
+            PaneKind::Predict => {
+                render_predict(frame, r.state, self.last_prediction);
+            }
+            PaneKind::Radar => {
+                let title = self
+                    .scenario
+                    .as_ref()
+                    .map(|s| s.title.as_str())
+                    .unwrap_or("");
+                render_radar(frame, r.state, &self.contacts, title);
+            }
+            PaneKind::Action => {
+                render_action(frame, r.state, &mut self.action_list);
+            }
+        }
+        let log: Vec<LogEntry> = self
+            .world
+            .as_ref()
+            .map(|w| w.log.clone())
+            .unwrap_or_default();
+        render_log(frame, r.log, &log);
+        self.render_status_line(frame);
+    }
+
+    /// Medium / Wide render — original 2×2 + log strip. Exactly the
+    /// behaviour the layout had before this refactor, now sourced from
+    /// the breakpoint-aware `game_layout`.
+    fn render_grid_game(&mut self, frame: &mut ratatui::Frame, r: &GameRects) {
+        if let Some(world) = &self.world {
+            render_state(frame, r.state, world);
+        }
+        render_predict(frame, r.predict, self.last_prediction);
+        let title = self
+            .scenario
+            .as_ref()
+            .map(|s| s.title.as_str())
+            .unwrap_or("");
+        render_radar(frame, r.radar, &self.contacts, title);
+        render_action(frame, r.action, &mut self.action_list);
+        let log: Vec<LogEntry> = self
+            .world
+            .as_ref()
+            .map(|w| w.log.clone())
+            .unwrap_or_default();
+        render_log(frame, r.log, &log);
+        self.render_status_line(frame);
+    }
+
+    /// Render the 4-pane tab strip across `area`. The active pane's
+    /// label is highlighted; the others are dimmed.
+    fn render_pane_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
+        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::text::{Line, Span};
+        use ratatui::widgets::Paragraph;
+        if area.width < 4 {
+            return;
+        }
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        for (i, kind) in [PaneKind::State, PaneKind::Predict, PaneKind::Radar, PaneKind::Action]
+            .iter()
+            .enumerate()
+        {
+            if i > 0 && spans.len() < area.width as usize {
+                spans.push(Span::styled(
+                    " │ ",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            let (fg, bg, modifier) = if *kind == self.active_pane {
+                (Color::Black, Color::Yellow, Modifier::BOLD)
+            } else {
+                (Color::Gray, Color::Reset, Modifier::empty())
+            };
+            spans.push(Span::styled(
+                format!(" {} ", kind.label()),
+                Style::default().fg(fg).bg(bg).add_modifier(modifier),
+            ));
+        }
+        // Trailing hint, only if there's room after the tab labels.
+        let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        if used + 14 <= area.width as usize {
+            spans.push(Span::styled(
+                " Tab to switch",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
 }
 
 /// Fit `s` to `max` terminal cells by keeping the **tail** (latest streamed
@@ -1081,12 +1290,20 @@ fn picker_status(picker: &Picker) -> String {
     }
 }
 
+/// Inner enum for the app — mirrors the crossterm key codes we accept.
+/// Defined here so we don't have to `use crossterm::event::KeyCode`
+/// directly from every caller; the binary's event module does the
+/// forward mapping.
 #[derive(Debug, Clone, Copy)]
 pub enum KeyCode {
     Up,
     Down,
     Enter,
     Esc,
+    /// Plain Tab.
+    Tab,
+    /// Shift+Tab (crossterm surfaces this as `BackTab`).
+    BackTab,
     Char(char),
     Any,
 }
@@ -1825,5 +2042,66 @@ mod playable_flow_tests {
         // status-line row depends on a layout we don't drive here; the
         // important property is "no panic, no byte-slice crash".
         terminal.draw(|f| app.render(f)).expect("narrow render must not panic");
+    }
+
+    /// Live radar: at game-start the contacts roster is deterministic
+    /// for the (turn 1, tension 40) seed and is non-empty.
+    #[test]
+    fn radar_contacts_present_and_deterministic_at_game_start() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Mode
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        assert_eq!(app.screen, Screen::Game);
+        // game-start hook already populated `contacts`.
+        assert!(
+            !app.contacts.is_empty(),
+            "radar contacts should be populated after game start"
+        );
+        // Snapshot is deterministic for the same turn seed.
+        let snap = app.contacts.clone();
+        app.refresh_contacts();
+        assert_eq!(
+            app.contacts, snap,
+            "refresh_contacts must yield the same row set for the same turn"
+        );
+    }
+
+    /// Live radar: contacts tick when a new turn advances the world.
+    #[test]
+    fn radar_contacts_change_after_commit_action_advances_turn() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter); // Mode
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        let start_roster = app.contacts.clone();
+        let start_turn = app.world.as_ref().unwrap().turn;
+        app.handle_game_key(KeyCode::Enter); // player action
+
+        // Heuristic opponent advances the world one more turn.
+        let _ = app.apply_heuristic_opponent();
+
+        let new_turn = app.world.as_ref().unwrap().turn;
+        assert!(
+            new_turn > start_turn,
+            "expected the turn counter to advance (got {start_turn} → {new_turn})"
+        );
+        assert_ne!(
+            app.contacts, start_roster,
+            "after turn advance, the radar roster must change — otherwise the live feed isn't live"
+        );
+    }
+
+    /// No world, no contacts: `refresh_contacts` is a safe no-op on an
+    /// `App` that hasn't started a game yet.
+    #[test]
+    fn radar_contacts_is_empty_when_no_world_exists() {
+        let mut app = fresh_app();
+        app.skip_splash();
+        app.refresh_contacts();
+        assert!(
+            app.contacts.is_empty(),
+            "with no world loaded, the radar must stay empty (not panic, not invent fake contacts)"
+        );
     }
 }

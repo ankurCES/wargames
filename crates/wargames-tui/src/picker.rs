@@ -19,6 +19,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use ratatui::Frame;
 use wargames_core::Faction;
 use wargames_core::Theater;
+use crate::text;
 
 /// The three picker steps. Order matters: Mode is the front door, Scenario
 /// is the back door (immediately followed by `enter_after_picker`).
@@ -411,31 +412,75 @@ pub fn render_picker(frame: &mut Frame, area: Rect, picker: &mut Picker) {
         return;
     }
 
+    // The list area is chunks[1]. Compute its inner width once so we
+    // can wrap descriptions that would otherwise overflow the row on
+    // narrow terminals (we never drop text — wrap, don't truncate).
+    let inner_w = chunks[1].width.saturating_sub(4) as usize; // block padding
+
     let items: Vec<ListItem> = match picker.step {
         PickerStep::Mode => picker
             .modes
             .iter()
             .map(|m| {
-                ListItem::new(Line::from(vec![
+                // Reserve at least 14 cells for the mode title so the
+                // bold-tag column stays aligned across list items; on
+                // very narrow panes the title column shrinks but still
+                // shows the value.
+                let title_col = inner_w.min(14);
+                let body_col = inner_w.saturating_sub(title_col + 3);
+                let title = format!("  {:<title_w$}", m.title, title_w = title_col);
+                // Wrap, never truncate — body text stays readable on
+                // every screen size we support.
+                let body_lines = text::wrap_to_width(&m.description, body_col.max(8));
+                let mut spans: Vec<Line> = Vec::with_capacity(1 + body_lines.len());
+                spans.push(Line::from(vec![
                     Span::styled(
-                        format!("  {:<14}", m.title),
+                        title,
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(m.description.clone(), Style::default().fg(Color::Gray)),
-                ]))
+                    Span::styled(
+                        body_lines.first().cloned().unwrap_or_default(),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]));
+                for extra in body_lines.iter().skip(1) {
+                    // Indent continuations so they line up under the body.
+                    let indent = " ".repeat(title_col + 2);
+                    spans.push(Line::from(Span::styled(
+                        format!("{indent}{extra}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                ListItem::new(spans)
             })
             .collect(),
         PickerStep::Country => picker
             .countries
             .iter()
             .map(|c| {
-                ListItem::new(Line::from(vec![
+                let title = format!("  {} ", c.faction.display_name());
+                let title_col = text::display_width(&title);
+                let body_col = inner_w.saturating_sub(title_col + 1);
+                let body_lines = text::wrap_to_width(&c.hint, body_col.max(8));
+                let mut spans: Vec<Line> = Vec::with_capacity(1 + body_lines.len());
+                spans.push(Line::from(vec![
                     Span::styled(
-                        format!("  {} ", c.faction.display_name()),
+                        title,
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(c.hint.clone(), Style::default().fg(Color::Gray)),
-                ]))
+                    Span::styled(
+                        body_lines.first().cloned().unwrap_or_default(),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ]));
+                for extra in body_lines.iter().skip(1) {
+                    let indent = " ".repeat(title_col);
+                    spans.push(Line::from(Span::styled(
+                        format!("{indent}{extra}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                ListItem::new(spans)
             })
             .collect(),
         PickerStep::Scenario => match picker.scenario_list() {

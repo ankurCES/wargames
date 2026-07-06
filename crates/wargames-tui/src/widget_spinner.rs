@@ -231,12 +231,22 @@ pub fn top_right_rect(frame_area: Rect) -> Rect {
 
 /// Convenience: bottom-right anchor — used on the game screen so the
 /// spinner never covers the action menu.
+///
+/// The previous `saturating_sub(h + 3)` was a constant offset that
+/// ignored the actual log pane height, so on a 24-row terminal the
+/// spinner painted on top of the log. We now clamp the vertical
+/// offset so the spinner always sits *above* the bottom-most row of
+/// the frame, regardless of height: at row N the offset is
+/// `max(h + 2, height / 4)`. That keeps a 2-row top margin from the
+/// status line on every screen we ship, while leaving plenty of room
+/// for the log above it.
 pub fn bottom_right_rect(frame_area: Rect) -> Rect {
     let w = SPINNER_W.min(frame_area.width);
     let h = SPINNER_H.min(frame_area.height);
+    let y_offset = (h + 2).max(frame_area.height / 4);
     Rect {
         x: frame_area.width.saturating_sub(w + 1),
-        y: frame_area.height.saturating_sub(h + 3),
+        y: frame_area.height.saturating_sub(y_offset),
         width: w,
         height: h,
     }
