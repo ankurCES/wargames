@@ -1332,12 +1332,12 @@ impl App {
         // a long comm.
         let line = if streaming {
             Line::from(format!(
-                " {}    [PgUp/PgDn] scroll comm  [↑↓] action  [Enter] commit  [p] predict  [Esc] quit",
+                " {}    [j/k] scroll log/comm  [PgUp/PgDn] page  [↑↓] action  [Enter] commit  [p] predict  [Esc] quit",
                 self.status
             ))
         } else {
             Line::from(format!(
-                " {}    [↑↓] action  [Enter] commit  [p] refresh predict  [Esc] quit",
+                " {}    [j/k] scroll log  [↑↓] action  [Enter] commit  [p] refresh predict  [Esc] quit",
                 self.status
             ))
         };

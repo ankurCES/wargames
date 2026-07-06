@@ -171,7 +171,7 @@ pub fn render(frame: &mut Frame, area: Rect, log: &[LogEntry], scroll: u16) {
             .map(|older| {
                 let count = older.len();
                 Line::from(Span::styled(
-                    format!("  … {count} earlier row{plu} (scroll with PgUp/PgDn)",
+                    format!("  … {count} earlier row{plu} (j/k or PgUp/PgDn)",
                         plu = if count == 1 { "" } else { "s" }),
                     Style::default().fg(theme.log_dim),
                 ))
@@ -485,5 +485,45 @@ mod tests {
                 .draw(|f| render(f, f.area(), &log, s))
                 .unwrap_or_else(|e| panic!("scroll={s} render must not panic: {e}"));
         }
+    }
+
+    /// The scroll hint that appears at the top of the pane when the
+    /// user has scrolled away from the tail must mention the
+    /// vim-style `j/k` keys (not just PgUp/PgDn) — both code paths
+    /// drive the scroll handler, so both deserve the discoverability.
+    #[test]
+    fn scroll_hint_mentions_jk_keys_alongside_pgup_pgdn() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::{TerminalOptions, Viewport};
+        let backend = TestBackend::new(60, 8);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let log: Vec<LogEntry> = (1..=30)
+            .map(|i| entry(i, "long message that wraps so we have plenty of scrollable content"))
+            .collect();
+        // Pass a non-zero scroll so the "earlier row(s)" marker is emitted.
+        terminal
+            .draw(|f| render(f, f.area(), &log, 8))
+            .expect("scroll-hint render must not panic");
+        let buf = terminal.backend().buffer().clone();
+        let mut s = String::with_capacity(
+            (buf.area.width as usize) * (buf.area.height as usize),
+        );
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(
+            s.contains("j/k"),
+            "scroll hint must mention j/k so users discover the vim-style keys, got buffer: {s:?}"
+        );
+        assert!(
+            s.contains("PgUp/PgDn"),
+            "scroll hint must keep mentioning PgUp/PgDn for users who prefer page keys, got buffer: {s:?}"
+        );
     }
 }
