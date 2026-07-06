@@ -127,11 +127,23 @@ pub struct App {
     /// a per-turn channel, read by the run loop on every tick. Cleared at
     /// the start of every opponent turn.
     pub streaming_message: String,
-    /// Scroll offset (rows) inside the streaming comm strip. The
-    /// streaming comm is shown in a 1-row strip above the status line
-    /// so the user can read longer-than-1-line messages. `PgUp`/
-    /// `PgDn`/`j`/`k` move this offset while the LLM is streaming.
-    /// Reset to `0` when a new streaming turn starts.
+    /// Canonical comm message from the most recently completed
+    /// opponent turn. Populated by `apply_opponent_action` once the
+    /// LLM call returns the full transcript; cleared at the start of
+    /// the next opponent turn so the strip doesn't display stale
+    /// text from a prior turn.
+    ///
+    /// The comm strip renders only when this is `Some`. Partial
+    /// streaming tokens are intentionally *not* shown — they used
+    /// to be, but the user explicitly asked for the strip to display
+    /// only the completed, full response. The log holds the same
+    /// canonical text on completion, so the strip is a focused,
+    /// scrollable, one-pane-at-a-time view of the same content.
+    pub last_comm: Option<String>,
+    /// Vertical scroll offset for the comm strip (wrapped-row index).
+    /// `0` = head of message; bumped by PgUp/PgDn/j/k. Reset to `0`
+    /// whenever `last_comm` is replaced with a new value so the user
+    /// always starts at the top of the newest message.
     pub comm_scroll: u16,
     /// Index of the in-flight comm entry in `world.log` while the LLM
     /// is streaming. `None` between turns. The first streamed delta
@@ -217,6 +229,7 @@ impl App {
             spinner_frame: 0,
             opponent_pending: false,
             streaming_message: String::new(),
+            last_comm: None,
             comm_scroll: 0,
             streaming_comm_idx: None,
             streaming_action: None,
@@ -911,10 +924,12 @@ impl App {
     /// widget renderers so the UI is always consistent with the
     /// current state.
     pub fn handle_log_scroll_key(&mut self, code: KeyCode) {
-        // While the LLM is streaming, route scroll keys to the
-        // comm strip so the user can read the full comm response
-        // even when it spans multiple wrapped rows.
-        if self.bg.is_busy() && !self.streaming_message.is_empty() {
+        // When the comm strip is visible (i.e. the last completed
+        // opponent turn produced a comm), scroll keys drive the
+        // comm strip. Otherwise they drive the event log. This
+        // gives the user a single consistent scroll affordance
+        // across the game screen.
+        if self.last_comm.is_some() {
             self.handle_comm_scroll_key(code);
             return;
         }
@@ -980,20 +995,22 @@ impl App {
         }
     }
 
-    /// Scroll the streaming comm strip. We compute the wrapped-row
-    /// count the same way as the strip renderer, then translate
-    /// PgUp/PgDn into a bounded offset. The full message always
-    /// reaches the log when streaming finishes — this is just the
-    /// live preview's scroll window.
+    /// Scroll the comm strip. Driven by `last_comm` (the canonical
+    /// comm from the most recently completed opponent turn). The
+    /// full message is always reachable via PgUp/PgDn/j/k.
     fn handle_comm_scroll_key(&mut self, code: KeyCode) {
+        // No comm → no-op. We already routed here via the caller's
+        // `last_comm.is_some()` check, but we keep this defensive in
+        // case future callers forget.
+        let Some(msg) = self.last_comm.as_ref() else {
+            return;
+        };
         // Wrap budget equal to the renderer's — we don't have an
         // `Rect` here, so we pick the worst-case log width (~80 cols)
         // and subtract the strip's leading " » soviet: " prefix.
         let prefix_len = " » soviet: ".chars().count();
         let msg_width = 80_usize.saturating_sub(prefix_len + 1).max(4);
-        let total = crate::text::wrap_to_width(&self.streaming_message, msg_width)
-            .len()
-            .max(1);
+        let total = crate::text::wrap_to_width(msg, msg_width).len().max(1);
         let max_off = total.saturating_sub(1) as u16;
         match code {
             KeyCode::PageUp | KeyCode::Char('k') => {
@@ -1141,6 +1158,17 @@ impl App {
         self.opponent_pending = false;
         let w = self.world.as_ref().unwrap().clone();
         self.status = format!("turn {} — opp: {} (\"{}\")", w.turn, action.as_str(), message);
+        // Cache the full canonical comm so the comm strip can show
+        // the *completed* response. We only show line 1 today
+        // (matching `LogEntry::comm`'s pushed message) — using
+        // `message` directly would diverge from the log entry and
+        // confuse users comparing the two.
+        self.last_comm = message.lines().next().map(|line| {
+            format!("soviet says: {}", line)
+        });
+        // Reset scroll to the head of the new comm so the user
+        // starts at the top.
+        self.comm_scroll = 0;
         // Refresh live radar contacts after the opponent moves.
         self.refresh_contacts();
         if wargames_core::engine::is_terminal(&w) {
@@ -1298,19 +1326,24 @@ impl App {
         use ratatui::style::{Color, Style};
         use ratatui::text::Line;
         use ratatui::widgets::Paragraph;
-        // While the LLM is streaming, we render two rows at the bottom:
-        //   row 0 (upper): the live comm message, wrapped, scrolled by `comm_scroll`
-        //   row 1 (lower): the regular status hint (action keys)
-        // The comm strip is reserved only while `bg.is_busy() &&
-        // !streaming_message.is_empty()`. Outside that window only
-        // the bottom row is used, so screen geometry for everything
-        // above stays the same.
+        // The bottom 1–2 rows are reserved as follows:
+        //   * `last_comm.is_some()` (canonical comm available):
+        //       row above status: the comm strip (1 row), driven by
+        //           `last_comm` + `comm_scroll`
+        //       bottom row:       status hint with comm-scroll keys
+        //   * otherwise:
+        //       bottom row only:  status hint with log-scroll keys
+        //
+        // Critical: the comm strip shows the *completed* comm, not
+        // partial streaming tokens. Streaming tokens were intentionally
+        // removed at user request — the strip used to flicker with
+        // every delta and the user wanted the full response only.
         let fa = frame.area();
-        let streaming = self.bg.is_busy() && !self.streaming_message.is_empty();
+        let has_comm = self.last_comm.is_some();
         let status_y = fa.height.saturating_sub(1);
         let comm_y = fa.height.saturating_sub(2);
 
-        if streaming {
+        if has_comm {
             // Render the comm strip on the second-to-last row.
             let comm_area = ratatui::layout::Rect {
                 x: 0,
@@ -1318,7 +1351,7 @@ impl App {
                 width: fa.width,
                 height: 1,
             };
-            self.render_streaming_comm_strip(frame, comm_area);
+            self.render_comm_strip(frame, comm_area);
         }
 
         let status_area = ratatui::layout::Rect {
@@ -1327,12 +1360,10 @@ impl App {
             width: fa.width,
             height: 1,
         };
-        // Regular status hint — same key hints as before, with the
-        // scroll hint while streaming so the user knows how to read
-        // a long comm.
-        let line = if streaming {
+        // Footer hints depend on whether the comm strip is visible.
+        let line = if has_comm {
             Line::from(format!(
-                " {}    [j/k] scroll log/comm  [PgUp/PgDn] page  [↑↓] action  [Enter] commit  [p] predict  [Esc] quit",
+                " {}    [j/k] scroll comm  [↑↓] action  [Enter] commit  [p] predict  [Esc] quit",
                 self.status
             ))
         } else {
@@ -1349,19 +1380,19 @@ impl App {
         frame.render_widget(p, status_area);
     }
 
-    /// Render the live streaming comm message into a 1-row strip at
-    /// the bottom of the screen, just above the status line. The
-    /// message is wrapped to the strip width and `comm_scroll` rows
-    /// of head-padding are applied so longer-than-1-line responses
-    /// are fully readable by paging up.
+    /// Render the most recently completed comm message into a 1-row
+    /// strip directly above the status line. The comm is wrapped to
+    /// the strip width and `comm_scroll` selects which wrapped row
+    /// to show — so the *full* response is reachable via j/k
+    /// (and PgUp/PgDn) even when it spans more wrapped rows than
+    /// the strip's 1 visible row.
     ///
-    /// Note: with only 1 row visible, "scrolling" really means
-    /// choosing which **wrapped row** to display. We compute the
-    /// wrapped rows, then show `lines[comm_scroll..comm_scroll+1]`.
-    /// That way the full message text is reachable (PgUp/Down) and
-    /// no characters are dropped (the log holds the canonical text
-    /// even when the strip is busy).
-    fn render_streaming_comm_strip(
+    /// Source: `self.last_comm` — populated atomically by
+    /// `apply_opponent_action` once the LLM returns the canonical
+    /// transcript. Partial streaming tokens are explicitly NOT
+    /// piped here; the strip intentionally hides during the next
+    /// streaming turn (until a new `last_comm` arrives).
+    fn render_comm_strip(
         &self,
         frame: &mut ratatui::Frame,
         area: ratatui::layout::Rect,
@@ -1370,18 +1401,20 @@ impl App {
         use ratatui::text::Line;
         use ratatui::widgets::Paragraph;
         let theme = theme::current();
-        // Wrap the message to `area.width` minus the prefix. We
-        // use the same `wrap_to_width` so non-Latin scripts and
-        // emoji-bound tokens behave identically to the log widget.
+        let Some(msg) = self.last_comm.as_ref() else {
+            return;
+        };
+        // Reserve cells for the leading " » soviet: " prefix and a
+        // trailing safety margin. We use the same wrap routine the
+        // log widget uses, so non-Latin scripts and emoji-bound
+        // tokens behave identically to the log entry the user can
+        // also scroll past.
         let prefix = " » soviet: ";
         let msg_width = (area.width as usize)
-            .saturating_sub(prefix.chars().count() + 1) // +1 = trailing cursor safety
+            .saturating_sub(prefix.chars().count() + 1)
             .max(4);
-        let wrapped = crate::text::wrap_to_width(&self.streaming_message, msg_width);
+        let wrapped = crate::text::wrap_to_width(msg, msg_width);
         let total_rows = wrapped.len().max(1);
-        // Show the row at index `comm_scroll`, clamped so the
-        // user can't paginate past the end. PgUp advances forward
-        // (skip older head rows), PgDn back to the start.
         let scroll = (self.comm_scroll as usize).min(total_rows.saturating_sub(1));
         let line_text = if wrapped.is_empty() {
             prefix.to_string()
@@ -2680,14 +2713,13 @@ mod playable_flow_tests {
         assert!(app.handle_game_key(KeyCode::Esc));
     }
 
-    /// When the LLM is streaming, scroll keys (PgUp/PgDn/j/k/Home/End)
-    /// must advance `comm_scroll` instead of `log_scroll`. This is
-    /// the contract that lets the user read the *full* streaming
-    /// comm — without it the strip would be stuck on row 0 and the
-    /// full response would only be reachable in the log after
-    /// streaming completes.
+    /// The comm strip renders the *completed* comm message (populated
+    /// by `apply_opponent_action`), not live streaming tokens. While
+    /// `last_comm.is_some()`, scroll keys drive the strip's vertical
+    /// offset; once the next turn begins and `last_comm` is cleared,
+    /// they route back to the event log.
     #[test]
-    fn comm_scroll_keys_route_to_comm_strip_while_streaming() {
+    fn comm_scroll_keys_route_to_comm_strip_post_completion() {
         let mut app = fresh_app();
         app.handle_picker_key(KeyCode::Enter); // Mode
         app.handle_picker_key(KeyCode::Enter); // Country
@@ -2695,29 +2727,30 @@ mod playable_flow_tests {
         assert_eq!(app.screen, Screen::Game);
 
         // Drive a single heuristic turn so `log_scroll` resets to 0
-        // and the world has at least one event. Then force the
-        // comm-strip render path: bg busy + a multi-line streaming
-        // message that wraps across several rows at ~80 cols.
+        // and the world exists. After the heuristic completes, the
+        // strip is *not* rendered (heuristic opponent doesn't go
+        // through `apply_opponent_action`). Manually set a multi-
+        // line `last_comm` so the strip becomes active — that's the
+        // exact path an LLM-driven turn takes on completion.
         let _ = app.handle_game_key(KeyCode::Enter);
         let _ = app.apply_heuristic_opponent();
         assert_eq!(app.log_scroll, 0);
-        app.set_llm_busy();
-        // ~80-col budget × ~12 words/line ≈ a multi-line wrap.
         let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
-        app.streaming_message = long.to_string();
+        app.last_comm = Some(format!("soviet says: {}", long));
         assert_eq!(app.comm_scroll, 0);
 
         // k advances inside the comm strip.
         app.handle_game_key(KeyCode::Char('k'));
         assert!(
             app.comm_scroll > 0,
-            "k must advance comm_scroll while streaming; got {}",
+            "k must advance comm_scroll while last_comm is set; got {}",
             app.comm_scroll
         );
-        // log_scroll is untouched (the comm strip is taking over).
-        assert_eq!(app.log_scroll, 0);
+        assert_eq!(
+            app.log_scroll, 0,
+            "log_scroll must not move while the comm strip is active"
+        );
 
-        // PgUp advances further (covers at least one row beyond k).
         let before = app.comm_scroll;
         app.handle_game_key(KeyCode::PageUp);
         assert!(
@@ -2727,7 +2760,6 @@ mod playable_flow_tests {
             app.comm_scroll
         );
 
-        // PgDn reverts one step.
         let peak = app.comm_scroll;
         app.handle_game_key(KeyCode::PageDown);
         assert_eq!(
@@ -2736,17 +2768,13 @@ mod playable_flow_tests {
             "PgDn must regress comm_scroll by exactly 1"
         );
 
-        // End re-anchors at row 0.
         app.handle_game_key(KeyCode::End);
         assert_eq!(app.comm_scroll, 0);
 
-        // After streaming ends, scroll keys route back to the log,
-        // not the comm strip. We turn bg off, run a few key presses
-        // against a long log, and check that `log_scroll` advances
-        // (synthetic long log injected below).
-        app.set_idle();
-        app.streaming_message.clear();
-        assert_eq!(app.comm_scroll, 0);
+        // Once a new turn begins, `last_comm` is cleared (driven by
+        // `main.rs` clearing it when the next LLM call fires), so
+        // scroll keys route back to the log.
+        app.last_comm = None;
         app.log_view_height = 4;
         if let Some(w) = app.world.as_mut() {
             for t in 100..130u32 {
@@ -2764,9 +2792,102 @@ mod playable_flow_tests {
         assert_eq!(
             app.log_scroll,
             before + 1,
-            "after streaming ends, k must drive log_scroll, not comm_scroll"
+            "after last_comm clears, k must drive log_scroll, not comm_scroll"
         );
         assert_eq!(app.comm_scroll, 0);
+    }
+
+    /// `apply_opponent_action` must populate `last_comm` with the
+    /// canonical "soviet says: ..." text (sourced from the response
+    /// line 1, matching what was pushed into the log). The strip
+    /// only renders while `last_comm.is_some()`, so this is the
+    /// single hook that makes the strip show the *full* response
+    /// after a turn completes — no partial streaming tokens.
+    #[test]
+    fn apply_opponent_action_populates_last_comm() {
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter);
+        assert_eq!(app.screen, Screen::Game);
+
+        let _ = app.handle_game_key(KeyCode::Enter);
+        let _ = app.apply_heuristic_opponent();
+        assert!(
+            app.last_comm.is_none(),
+            "heuristic opponent must not populate last_comm"
+        );
+
+        // LLM-style path — `apply_opponent_action` accepts the
+        // canonical snake_case tags emitted by `Action::as_str`.
+        assert!(app.apply_opponent_action(
+            "patrol",
+            "we are moving north, please observe and respond carefully",
+        ));
+        let last = app.last_comm.as_ref().expect("apply_opponent_action must populate last_comm");
+        assert!(
+            last.contains("soviet says:"),
+            "last_comm must include the canonical prefix; got {last:?}"
+        );
+        assert!(
+            last.contains("we are moving north"),
+            "last_comm must contain the response line; got {last:?}"
+        );
+    }
+
+    /// The comm strip's render path is gated on `last_comm.is_some()`
+    /// — partial streaming tokens in `streaming_message` must NOT
+    /// trigger the strip's render. Verify by driving a render with
+    /// a non-empty `streaming_message` but a `None` `last_comm`
+    /// (i.e. mid-stream state), and confirm the strip's row was
+    /// empty rather than showing partial text.
+    #[test]
+    fn comm_strip_does_not_render_partial_streaming_tokens() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        use ratatui::{TerminalOptions, Viewport};
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::with_options(backend, TerminalOptions {
+            viewport: Viewport::Fullscreen,
+        })
+        .expect("TestBackend terminal constructs");
+        let mut app = fresh_app();
+        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter);
+        app.handle_picker_key(KeyCode::Enter);
+        assert_eq!(app.screen, Screen::Game);
+        let _ = app.handle_game_key(KeyCode::Enter);
+        let _ = app.apply_heuristic_opponent();
+
+        // Mid-LLM-call state: streaming_message has partial tokens,
+        // but last_comm is None because the call is still in flight.
+        app.set_llm_busy();
+        app.streaming_message =
+            "partial interim tokens that should never appear in the strip".to_string();
+        assert!(
+            app.last_comm.is_none(),
+            "precondition: streaming state without last_comm"
+        );
+
+        terminal
+            .draw(|f| app.render(f))
+            .expect("mid-stream render must not panic");
+        let buf = terminal.backend().buffer().clone();
+        // Walk the entire buffer and confirm the partial tokens
+        // don't appear anywhere (especially the second-to-last row,
+        // which is where the comm strip would render if active).
+        let mut s = String::with_capacity(
+            (buf.area.width as usize) * (buf.area.height as usize),
+        );
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                s.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(
+            !s.contains("partial interim tokens"),
+            "partial streaming tokens must not appear in any rendered row; got buffer:\n{s:?}"
+        );
     }
 
     /// `refresh_contacts` is called on every world mutation; it resets
