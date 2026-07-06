@@ -69,38 +69,45 @@ impl Breakpoint {
 }
 
 /// All the rectangles the game screen needs to paint. The fields are
-/// always populated; `Compact` mode zeros out the unused panes and
-/// surfaces only `active_pane` for the renderer to draw.
+/// always populated; `Compact` mode draws `tabs + left + log + action`
+/// in a single column; `Medium`/`Wide` skip the tab strip and place
+/// `left` and `log` side by side above a full-width `action` strip.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GameRects {
     pub breakpoint: Breakpoint,
-    /// Where the top-level body goes. The split into columns + rows
-    /// depends on the breakpoint.
+    /// Total body area (full game pane minus status row). Equal to
+    /// `left` in Medium/Wide.
     pub body: Rect,
-    /// STATE pane (top-left in 2×2; sole pane in Compact).
-    pub state: Rect,
-    /// PREDICT pane (bottom-left in 2×2; hidden in Compact).
-    pub predict: Rect,
-    /// RADAR pane (top-right in 2×2; hidden in Compact).
-    pub radar: Rect,
-    /// ACTION menu (bottom-right in 2×2; shown as overlay in Compact).
-    pub action: Rect,
-    /// EVENT LOG strip — always at the bottom across all breakpoints.
+    /// Left pane — hosts the currently-active cycling pane
+    /// (`State`/`Predict`/`Radar`). Spans the full top-area width in
+    /// Compact; takes the leftmost columns in Medium/Wide.
+    pub left: Rect,
+    /// Event log rectangle. Always visible at Medium/Wide; sits at the
+    /// bottom of the body column in Compact.
     pub log: Rect,
-    /// Tab strip rendered above the active pane in Compact mode. Width
-    /// spans the body; for non-Compact layouts it's `Rect::default()` and
-    /// the widgets ignore it.
+    /// Action strip rectangle — full-width bottom bar in Medium/Wide;
+    /// 3-row strip in Compact. Holds the action list.
+    pub action: Rect,
+    /// Tab strip — only used in Compact. `Rect::default()` at
+    /// Medium/Wide; widgets ignore it there.
     pub tabs: Rect,
-    /// STATUS line — single row at the bottom. Distinct from `log` so the
-    /// game status never overlaps event messages.
+    /// Status line — single row at the bottom. Distinct from `log`.
     pub status: Rect,
-    /// Which pane is currently active in Compact mode. For other
-    /// breakpoints this defaults to `PaneKind::State` and is unused.
+    /// Currently-active tab-cyclable pane (`State` / `Predict` /
+    /// `Radar`). `Action` is *not* a tab-cyclable variant — it lives
+    /// in the action strip and doesn't move.
     pub active_pane: PaneKind,
 }
 
-/// The four "core" game panels. Used by the tab strip and the
-/// `render_game` dispatcher.
+/// The game panels the player can land on. There are now two distinct
+/// kinds:
+///
+/// 1. **Tab-cyclable**: `State`, `Predict`, `Radar`. These are the panes
+///    that occupy the *left* half of the body in Medium/Wide mode and
+///    cycle with Tab/Shift+Tab.
+/// 2. **Pinned**: `Action` and `Log`. `Action` is the bottom-bar action
+///    strip; `Log` is the always-on right side at Medium/Wide. Neither
+///    is part of the Tab cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneKind {
     State,
@@ -110,24 +117,26 @@ pub enum PaneKind {
 }
 
 impl PaneKind {
-    /// Next pane clockwise (Tab). Wraps around.
-    pub fn next(self) -> Self {
-        match self {
-            PaneKind::State => PaneKind::Predict,
-            PaneKind::Predict => PaneKind::Radar,
-            PaneKind::Radar => PaneKind::Action,
-            PaneKind::Action => PaneKind::State,
-        }
+    /// Pane-cyclable variants in their canonical order. `Action` is
+    /// intentionally absent — it lives in the bottom strip, not in
+    /// the tab cycle.
+    pub fn tab_order() -> &'static [PaneKind] {
+        &[PaneKind::State, PaneKind::Predict, PaneKind::Radar]
     }
 
-    /// Previous pane (Shift+Tab).
+    /// Next tab-cyclable pane clockwise (Tab). Wraps around the cycle.
+    pub fn next(self) -> Self {
+        let order = Self::tab_order();
+        let idx = order.iter().position(|p| *p == self).unwrap_or(0);
+        order[(idx + 1) % order.len()]
+    }
+
+    /// Previous tab-cyclable pane (Shift+Tab).
     pub fn prev(self) -> Self {
-        match self {
-            PaneKind::State => PaneKind::Action,
-            PaneKind::Action => PaneKind::Radar,
-            PaneKind::Radar => PaneKind::Predict,
-            PaneKind::Predict => PaneKind::State,
-        }
+        let order = Self::tab_order();
+        let idx = order.iter().position(|p| *p == self).unwrap_or(0);
+        let prev = if idx == 0 { order.len() - 1 } else { idx - 1 };
+        order[prev]
     }
 
     pub fn label(self) -> &'static str {
@@ -148,141 +157,123 @@ impl Default for PaneKind {
 
 /// Compute the `GameRects` for an arbitrary area. Always returns
 /// rectangles fully contained in `area`; never panics on `area.width=0`.
+///
+/// Layout (Medium / Wide):
+///
+/// ```text
+/// +-----------------------------------+------+
+/// |  left = active tab-cyclable pane  | log  |
+/// |  (state, predict, or radar)       |      |
+/// +-----------------------------------+------+
+/// |       action strip (full width)             |
+/// +--------------------------------------------+
+/// | status (1 row)                             |
+/// +--------------------------------------------+
+/// ```
+///
+/// In Compact mode the layout collapses to a single column with the
+/// same vertical order — tabs strip + active pane + log + action —
+/// but the column widths are full.
+///
+/// Tab-cycling acts on the *left* pane only. The log is always visible
+/// at Medium/Wide, the action strip is always at the bottom.
 pub fn game_layout(area: Rect) -> GameRects {
     let breakpoint = Breakpoint::classify(area);
 
     if matches!(breakpoint, Breakpoint::TooSmall) {
-        // No layout to compute; the caller paints an overlay using
-        // `area` directly.
         return GameRects {
             breakpoint,
             body: area,
-            state: area,
-            predict: Rect::default(),
-            radar: Rect::default(),
-            action: Rect::default(),
+            left: area,
             log: Rect::default(),
+            action: Rect::default(),
             tabs: Rect::default(),
             status: Rect::default(),
             active_pane: PaneKind::State,
         };
     }
 
-    // Reserve the bottom row for the status line.
+    // Body = area minus status (1 row). Everything else (left, log,
+    // action strip, tabs) lives inside `body`.
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1), // status
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(area);
     let status = vertical[1];
     let body = vertical[0];
 
     if matches!(breakpoint, Breakpoint::Compact) {
-        // Single column. Tab strip is 3 rows; remaining rows show the
-        // active pane. The log is omitted in Compact to leave room — the
-        // user moves between panes with Tab/Shift+Tab and reads the log
-        // by switching to the dedicated log surface (the existing event
-        // log stays available via the action pane in a future iteration;
-        // for now we still paint the log at the bottom inside the body).
-        // Actually: to preserve the log always-visible behaviour users
-        // rely on, we shrink it to 5 rows and the tab+active pane share
-        // the remaining rows.
+        // Single column. Top: tabs strip + active pane. Bottom: log +
+        // action strip. Total minimum: 1 (tabs) + 4 (pane) + 4 (log)
+        // + 3 (action) = 12 rows of body plus 1 of status.
         let compact_v = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),  // tabs
                 Constraint::Min(4),    // active pane
-                Constraint::Length(5), // log
+                Constraint::Length(4), // log strip
+                Constraint::Length(3), // action strip
             ])
             .split(body);
         let tabs = compact_v[0];
-        let active = compact_v[1];
+        let left = compact_v[1];
         let log = compact_v[2];
-        // Per-breakpoint defaults: state pane gets the body; the rest
-        // are zero-area and the renderer skips them.
+        let action = compact_v[3];
         return GameRects {
             breakpoint,
-            body: active,
-            state: active,
-            predict: Rect::default(),
-            radar: Rect::default(),
-            action: Rect::default(),
+            body,
+            left,
             log,
+            action,
             tabs,
             status,
             active_pane: PaneKind::State,
         };
     }
 
-    // Medium & Wide: 2×2 grid + log strip in the body.
-    //
-    // The right column gets a fixed minimum width derived from the
-    // longest action row so the action panel is always fully legible
-    // (every verb + description visible without truncation). When the
-    // terminal is narrower than 2 × that minimum, we degrade to a
-    // single-column layout instead of forcing a squeeze — that case is
-    // already covered by Compact, but the guard keeps the math safe.
+    // Medium / Wide: split body horizontally into [top-area | action-bar]
+    // and vertically inside the top-area into [left | log].
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(8),
-            Constraint::Length(8), // log
+            Constraint::Min(6),          // top-area (left + log)
+            Constraint::Length(3),       // action strip
         ])
         .split(body);
+    let top_area = rows[0];
+    let action = rows[1];
 
-    // Action panel width budget: 2 borders + the desired inner width.
-    // The widget reads `inner.width` and downsizes gracefully if we ever
-    // hand it less, but the layout's job is to *not* let that happen.
-    let action_panel_outer = widget_action::desired_inner_width().saturating_add(2);
-    let right_min = action_panel_outer.max(0);
-    // For the body to be wider than `right_min × 2`, otherwise fall
-    // back to a balanced split so both columns still get some space.
-    let body_cols = if rows[0].width >= right_min * 2 {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(right_min),
-            ])
-            .split(rows[0])
+    // Pick a log width that always shows enough content to be useful
+    // (≥ 24 cells, otherwise narrow it further to keep the left pane
+    // legible). The right side is always the log; the left side hosts
+    // the active cycling pane.
+    let log_min: u16 = 24;
+    let log_width = if top_area.width / 2 >= log_min {
+        top_area.width / 3 // ~1/3 of the top area stays on the right
+    } else if top_area.width >= log_min + 1 {
+        // Just under half on a tighter pane so the left still gets
+        // most of the screen for the cycling pane.
+        log_min
     } else {
-        // Too narrow for the side-panel — use a balanced split as a
-        // fallback so the panes remain visible (each one will then
-        // honour `widget_action::desired_inner_width` inside its own
-        // line rendering).
-        let diff_break = (rows[0].width / 2).max(widget_action::ACTION_PANEL_MIN_INNER_WIDTH);
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(diff_break),
-                Constraint::Min(0),
-            ])
-            .split(rows[0])
+        // Extremely narrow medium — split halfway.
+        top_area.width / 2
     };
-
-    let left_rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(body_cols[0]);
-
-    let right_rows = Layout::default()
-        .direction(Direction::Vertical)
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(60), // radar on top
-            Constraint::Percentage(40), // action panel on bottom — always visible
+            Constraint::Min(0),
+            Constraint::Length(log_width),
         ])
-        .split(body_cols[1]);
+        .split(top_area);
+    let left = cols[0];
+    let log = cols[1];
 
     GameRects {
         breakpoint,
-        body: rows[0],
-        state: left_rows[0],
-        predict: left_rows[1],
-        radar: right_rows[0],
-        action: right_rows[1],
-        log: rows[1],
+        body,
+        left,
+        log,
+        action,
         tabs: Rect::default(),
         status,
         active_pane: PaneKind::State,
@@ -293,12 +284,12 @@ pub fn game_layout(area: Rect) -> GameRects {
 /// preserved so existing callers don't break. New callers should migrate
 /// to `game_layout` (returns `GameRects`).
 ///
-/// Returns `(state, predict, radar, action, log)`.
+/// Returns `(body, left, log, action, status)`.
 pub fn legacy_game_layout(
     area: Rect,
 ) -> (Rect, Rect, Rect, Rect, Rect) {
     let r = game_layout(area);
-    (r.state, r.predict, r.radar, r.action, r.log)
+    (r.body, r.left, r.log, r.action, r.status)
 }
 
 #[cfg(test)]
@@ -386,12 +377,11 @@ mod tests {
             height: 7,
         });
         assert_eq!(r.breakpoint, Breakpoint::TooSmall);
-        assert_eq!(r.state, r.body);
-        // Remaining rects are zero-size so the renderer skips them.
-        assert_eq!(r.predict.width, 0);
-        assert_eq!(r.radar.width, 0);
-        assert_eq!(r.action.width, 0);
+        assert_eq!(r.left, r.body);
+        // log + action + tabs are zero-sized on TooSmall.
         assert_eq!(r.log.width, 0);
+        assert_eq!(r.action.width, 0);
+        assert_eq!(r.tabs.width, 0);
     }
 
     #[test]
@@ -405,7 +395,7 @@ mod tests {
         let r = game_layout(area);
         assert_eq!(r.breakpoint, Breakpoint::Compact);
         // Every returned rect must lie within `area`.
-        for pane in [r.body, r.state, r.tabs, r.log, r.status] {
+        for pane in [r.body, r.left, r.tabs, r.log, r.action, r.status] {
             assert!(
                 pane.x + pane.width <= area.width,
                 "pane right edge {}+{} > area.width {}",
@@ -421,15 +411,16 @@ mod tests {
                 area.height
             );
         }
-        // In Compact we only show the active pane (state by default) —
-        // the others are zero-area so the renderer skips them.
-        assert_eq!(r.predict.width, 0);
-        assert_eq!(r.radar.width, 0);
-        assert_eq!(r.action.width, 0);
+        // Tabs strip is only present in Compact.
+        assert!(r.tabs.height >= 1);
+        // Log is in the column (full width) at Compact.
+        assert!(r.log.width > 0);
+        // Action strip is present.
+        assert!(r.action.width > 0);
     }
 
     #[test]
-    fn game_layout_medium_keeps_all_panes_visible() {
+    fn game_layout_medium_shows_split_left_and_log_plus_action_strip() {
         let area = Rect {
             x: 0,
             y: 0,
@@ -438,75 +429,73 @@ mod tests {
         };
         let r = game_layout(area);
         assert_eq!(r.breakpoint, Breakpoint::Medium);
-        assert!(r.state.width > 0);
-        assert!(r.predict.width > 0);
-        assert!(r.radar.width > 0);
-        assert!(r.action.width > 0);
+        assert!(r.left.width > 0);
         assert!(r.log.width > 0);
-        // The right column is sized to fit the action panel, so the
-        // state column is `width - right_min`. We don't assert
-        // 50/50 anymore — the contract is "action panel always
-        // legible", not "two equal columns". This test only verifies
-        // every pane is visible.
-        let panel_min = widget_action::desired_inner_width() + 2; // include borders
+        assert!(r.action.width > 0);
+        // The log sits on the *right* of the body — invariant of the
+        // new shape.
         assert!(
-            r.action.width >= panel_min,
-            "Medium must keep action panel ≥ {} cells (got {})",
-            panel_min,
-            r.action.width
+            r.log.x > r.left.x,
+            "log must be right of the left pane (left.x={}, log.x={})",
+            r.left.x,
+            r.log.x
+        );
+        // The action strip is below the body — invariant of the
+        // bottom-bar shape.
+        assert!(
+            r.action.y > r.left.y,
+            "action strip must be below the body (left.y={}, action.y={})",
+            r.left.y,
+            r.action.y
+        );
+        // The action strip is full body width.
+        assert_eq!(
+            r.action.width, r.body.width,
+            "action strip width ({}) must equal body width ({})",
+            r.action.width, r.body.width
         );
     }
 
     #[test]
-    fn game_layout_wide_keeps_action_panel_at_least_as_wide_as_longest_row() {
-        // The whole point of the responsive redesign is that the
-        // action menu is a *visible* side panel — its inner width is
-        // sized to fit every verb + its description. Asserting the
-        // invariant at the canonical Wide geometry (160x40) plus a
-        // few medium geometries is enough to lock the contract.
-        for (w, h) in [(160u16, 40u16), (120, 32), (100, 30), (95, 30)] {
+    fn game_layout_wide_keeps_action_panel_full_width_and_below_log() {
+        // The new shape: action strip is full body width at the
+        // bottom; event log always-on right; cycling pane on the left.
+        for (w, h) in [(160u16, 40u16), (120, 32), (200, 50), (240, 60)] {
             let area = Rect { x: 0, y: 0, width: w, height: h };
             let r = game_layout(area);
-            let action_inner = r.action.width.saturating_sub(2);
-            assert!(
-                action_inner >= widget_action::desired_inner_width(),
-                "{w}x{h}: action inner width {action_inner} must fit longest row {}",
-                widget_action::desired_inner_width()
+            // Action strip must be full body width.
+            assert_eq!(
+                r.action.width, r.body.width,
+                "{w}x{h}: action strip width ({}) must equal body width ({})",
+                r.action.width, r.body.width
             );
-            // Action panel must sit on the right side of the body and
-            // own at least 40% of the vertical space (it's the bottom
-            // row of the right column).
+            // Action strip must be below the body proper.
             assert!(
-                r.action.x >= r.state.x,
-                "action panel must be on the right of (or below) the state column"
+                r.action.y >= r.log.y + r.log.height.saturating_sub(1)
+                    || r.action.y > r.left.y + r.left.height.saturating_sub(1),
+                "{w}x{h}: action strip must sit below the body"
             );
+            // Log must be to the right of the left pane.
             assert!(
-                r.action.height >= r.radar.height / 2,
-                "action panel must remain visible (height {} must be >= radar height/2 {})",
-                r.action.height,
-                r.radar.height / 2
+                r.log.x > r.left.x,
+                "{w}x{h}: log must be right of the left pane"
             );
         }
     }
 
     #[test]
-    fn game_layout_wide_uses_35_65_split() {
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: 160,
-            height: 40,
-        };
+    fn game_layout_wide_left_pane_takes_more_than_log() {
+        // The action strip is full-width and there's no separate
+        // radar/predict pane — the left pane hosts the cycling pane
+        // and inherits the larger share of the horizontal space.
+        let area = Rect { x: 0, y: 0, width: 200, height: 50 };
         let r = game_layout(area);
         assert_eq!(r.breakpoint, Breakpoint::Wide);
-        // The right column holds the *fixed minimum* action panel —
-        // so state column may now be wider than before but the right
-        // column must remain at least as wide as the action panel.
         assert!(
-            r.radar.width >= widget_action::desired_inner_width(),
-            "Wide right column should accommodate the action panel (radar width {}, panel needs {})",
-            r.radar.width,
-            widget_action::desired_inner_width()
+            r.left.width > r.log.width,
+            "left pane should take more horizontal space than the log (left={}, log={})",
+            r.left.width,
+            r.log.width
         );
     }
 
@@ -537,7 +526,7 @@ mod tests {
                 height: h,
             };
             let r = game_layout(area);
-            for pane in [r.state, r.predict, r.radar, r.action, r.log, r.tabs, r.status] {
+            for pane in [r.left, r.log, r.action, r.tabs, r.status] {
                 if pane.width == 0 && pane.height == 0 {
                     continue; // unused in this breakpoint
                 }
@@ -561,33 +550,37 @@ mod tests {
 
     #[test]
     fn legacy_game_layout_matches_new_layout() {
-        // Smoke test the legacy 5-tuple form.
+        // Smoke test the legacy 5-tuple form. We now return
+        // `(body, left, log, action, status)`.
         let area = Rect {
             x: 0,
             y: 0,
             width: 120,
             height: 40,
         };
-        let (s, p, r, a, l) = legacy_game_layout(area);
+        let (body, left, log, action, status) = legacy_game_layout(area);
         let g = game_layout(area);
-        assert_eq!(s, g.state);
-        assert_eq!(p, g.predict);
-        assert_eq!(r, g.radar);
-        assert_eq!(a, g.action);
-        assert_eq!(l, g.log);
+        assert_eq!(body, g.body);
+        assert_eq!(left, g.left);
+        assert_eq!(log, g.log);
+        assert_eq!(action, g.action);
+        assert_eq!(status, g.status);
     }
 
     #[test]
-    fn pane_kind_cycles_through_tabs() {
+    fn pane_kind_cycles_through_three_tab_panes() {
+        // Tab-cycling now goes State → Predict → Radar → State.
+        // `Action` is the bottom-bar strip and is not in the cycle.
         use PaneKind::*;
         assert_eq!(State.next(), Predict);
         assert_eq!(Predict.next(), Radar);
-        assert_eq!(Radar.next(), Action);
-        assert_eq!(Action.next(), State);
+        assert_eq!(Radar.next(), State);
         // Reverse:
-        assert_eq!(State.prev(), Action);
-        assert_eq!(Action.prev(), Radar);
+        assert_eq!(State.prev(), Radar);
         assert_eq!(Radar.prev(), Predict);
         assert_eq!(Predict.prev(), State);
+        // tab_order excludes Action.
+        assert_eq!(PaneKind::tab_order().len(), 3);
+        assert!(!PaneKind::tab_order().contains(&Action));
     }
 }

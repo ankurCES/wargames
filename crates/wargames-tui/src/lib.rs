@@ -17,6 +17,7 @@ pub mod panes;
 pub mod picker;
 pub mod splash;
 pub mod text;
+pub mod theme;
 pub mod tts;
 pub mod widget_action;
 pub mod widget_log;

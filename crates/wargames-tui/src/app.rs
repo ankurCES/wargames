@@ -1240,18 +1240,19 @@ impl App {
     /// Compact (≤80 cols, ≤24 rows) game render — single-column layout
     /// with a tab strip cycling through the four panels.
     fn render_compact_game(&mut self, frame: &mut ratatui::Frame, r: &GameRects) {
-        // Tabs strip — always visible so the user can see which pane
-        // they're on and what they can switch to.
+        // Tabs strip — only present in Compact; the Medium/Wide
+        // layouts leave `r.tabs` zero-area and the renderer skips it.
         self.render_pane_tabs(frame, r.tabs);
-        // Active pane.
+        // Active pane goes in `r.left` (in Compact this is the
+        // single-column main slot).
         match self.active_pane {
             PaneKind::State => {
                 if let Some(world) = &self.world {
-                    render_state(frame, r.state, world);
+                    render_state(frame, r.left, world);
                 }
             }
             PaneKind::Predict => {
-                render_predict(frame, r.state, self.last_prediction);
+                render_predict(frame, r.left, self.last_prediction);
             }
             PaneKind::Radar => {
                 let title = self
@@ -1259,10 +1260,16 @@ impl App {
                     .as_ref()
                     .map(|s| s.title.as_str())
                     .unwrap_or("");
-                render_radar(frame, r.state, &self.contacts, title);
+                render_radar(frame, r.left, &self.contacts, title);
             }
             PaneKind::Action => {
-                render_action(frame, r.state, &mut self.action_list);
+                // Defensive fallback: if the active pane was somehow
+                // left at Action, point it back to State so the user
+                // doesn't see a blank left pane.
+                self.active_pane = PaneKind::State;
+                if let Some(world) = &self.world {
+                    render_state(frame, r.left, world);
+                }
             }
         }
         let log: Vec<LogEntry> = self
@@ -1274,24 +1281,42 @@ impl App {
         // translate "viewport rows" into scroll units.
         self.log_view_height = r.log.height;
         render_log(frame, r.log, &log, self.log_scroll);
+        // Action strip — full-width in Medium/Wide, sits at the
+        // bottom of the Compact body too.
+        render_action(frame, r.action, &mut self.action_list);
         self.render_status_line(frame);
     }
 
-    /// Medium / Wide render — original 2×2 + log strip. Exactly the
-    /// behaviour the layout had before this refactor, now sourced from
-    /// the breakpoint-aware `game_layout`.
+    /// Medium / Wide render — left pane = active cycling pane, log
+    /// always-on right, action strip always at the bottom. The two
+    /// non-Compact halves differ only in column widths.
     fn render_grid_game(&mut self, frame: &mut ratatui::Frame, r: &GameRects) {
-        if let Some(world) = &self.world {
-            render_state(frame, r.state, world);
+        // Left pane renders whichever cycling pane is active.
+        match self.active_pane {
+            PaneKind::State => {
+                if let Some(world) = &self.world {
+                    render_state(frame, r.left, world);
+                }
+            }
+            PaneKind::Predict => {
+                render_predict(frame, r.left, self.last_prediction);
+            }
+            PaneKind::Radar => {
+                let title = self
+                    .scenario
+                    .as_ref()
+                    .map(|s| s.title.as_str())
+                    .unwrap_or("");
+                render_radar(frame, r.left, &self.contacts, title);
+            }
+            PaneKind::Action => {
+                self.active_pane = PaneKind::State;
+                if let Some(world) = &self.world {
+                    render_state(frame, r.left, world);
+                }
+            }
         }
-        render_predict(frame, r.predict, self.last_prediction);
-        let title = self
-            .scenario
-            .as_ref()
-            .map(|s| s.title.as_str())
-            .unwrap_or("");
-        render_radar(frame, r.radar, &self.contacts, title);
-        render_action(frame, r.action, &mut self.action_list);
+        // Event log — always on the right at this breakpoint.
         let log: Vec<LogEntry> = self
             .world
             .as_ref()
@@ -1299,11 +1324,14 @@ impl App {
             .unwrap_or_default();
         self.log_view_height = r.log.height;
         render_log(frame, r.log, &log, self.log_scroll);
+        // Action strip — full width at the bottom.
+        render_action(frame, r.action, &mut self.action_list);
         self.render_status_line(frame);
     }
 
-    /// Render the 4-pane tab strip across `area`. The active pane's
-    /// label is highlighted; the others are dimmed.
+    /// Render the 3-pane tab strip across `area`. Only the
+    /// tab-cyclable variants (State, Predict, Radar) appear; Action
+    /// is the bottom-bar strip and never appears in the cycle.
     fn render_pane_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
         use ratatui::style::{Color, Modifier, Style};
         use ratatui::text::{Line, Span};
@@ -1312,10 +1340,7 @@ impl App {
             return;
         }
         let mut spans: Vec<Span<'static>> = Vec::new();
-        for (i, kind) in [PaneKind::State, PaneKind::Predict, PaneKind::Radar, PaneKind::Action]
-            .iter()
-            .enumerate()
-        {
+        for (i, kind) in PaneKind::tab_order().iter().enumerate() {
             if i > 0 && spans.len() < area.width as usize {
                 spans.push(Span::styled(
                     " │ ",

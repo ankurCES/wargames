@@ -12,6 +12,7 @@ mod panes;
 mod picker;
 mod splash;
 mod text;
+mod theme;
 mod tts;
 mod widget_action;
 mod widget_log;
