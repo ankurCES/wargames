@@ -1,6 +1,18 @@
 # Wargames
 
-A WOPR-style strategic war game TUI written in Rust.
+> A WOPR-style strategic war game TUI written in Rust.
+
+```
+   ╔══════════════════════════════════════════════════════════════════════╗
+   ║  ▓▓▓  W A R   G A M E S    ::    WOPR   JOSHUA   ::    v 1.0          ║
+   ║  ─────────────────────────────────────────────────────────────────    ║
+   ║   > PLAYER:    UNITED STATES                              ▮ DEFCON 3   ║
+   ║   > OPPONENT:  USSR                                        ▮ TENSION 4 ║
+   ║   > SCENARIO:  NORTH_ATLANTIC_2024                                   ║
+   ║   > MODEL:     MiniMax-M3     ── streaming ── →  keeper, 720p, ⅓ height ║
+   ║   > STATE:     ◤ ━━━━━━━━━━━━ STRIKE ━━━━━━━━━━━━ ◢                         ║
+   ╚══════════════════════════════════════════════════════════════════════╝
+```
 
 Modeled after the [herdr](https://github.com/ogulcancelik/herdr) terminal
 workspace manager (ratatui 0.30 + crossterm 0.29 + clap 4).
@@ -54,13 +66,52 @@ used by every blumi app on this host). The path is hardcoded — there is no
 environment-variable override — so every app on the device agrees on a
 single config file.
 
-The relevant fields:
-
-- `providers.<name>.{api_key, base_url}` — LLM credentials (anthropic-compatible).
-- `router.light.{model, provider}` — default model for the Soviet commander.
-- `voice.tts_api_key`, `voice.tts_voice` — optional, TTS is best-effort.
-
 If `~/.blumi/settings.json` is missing, the binary exits with code 2.
+
+### Sample
+
+A complete, copiable starting point lives at
+[`examples/settings.sample.json`](examples/settings.sample.json). Copy it to
+`~/.blumi/settings.json` and fill in the placeholder API keys:
+
+```
+cp examples/settings.sample.json ~/.blumi/settings.json
+$EDITOR ~/.blumi/settings.json
+```
+
+The file is template-only — every `api_key` is a literal `PLACEHOLDER_*`
+string and is never read from the developer's actual config. The JSON file
+is also round-tripped by `cargo test -p wargames-tui --lib config::` so a
+schema drift will fail CI before any user copy-pastes a broken version.
+
+### Fields wargames consumes
+
+wargames reads a **strict subset** of the file (the rest is consumed by
+other blumi apps on the same device and is ignored here):
+
+- `providers.<name>.{api_key, base_url, kind, models}` — LLM credentials.
+  `base_url` is the Anthropic-compatible root; wargames appends
+  `/v1/messages` for both REST and SSE. `kind` defaults to `"anthropic"`.
+  Three providers ship in the sample (`minimax`, `azure-foundry`,
+  `anthropic-direct`); pick whichever you have a key for.
+- `router.light.{model, provider}` — the default model for the Soviet
+  commander. `provider` must name a key under `providers`; `model` should
+  appear in that provider's `models` list.
+- `voice.*` — optional, TTS is best-effort and wargames ignores it.
+
+`router.heavy` and `router.judge` are read by other blumi apps (cyberdeck,
+etc.) and ignored by wargames.
+
+### How wargames uses it
+
+At startup, `BlumiSettings::from_path` deserializes the file into the
+typed `BlumiSettings { providers, router, voice }` struct (see
+`crates/wargames-tui/src/config.rs`). The Soviet commander's LLM client is
+then built by resolving `router.light.provider` → `providers[name]` and
+reading `api_key`, `base_url`, and `model`. All HTTP calls go through one
+`reqwest::Client`; the streaming path uses Anthropic-compatible SSE
+(`/v1/messages?stream=true`) and falls back to a deterministic heuristic
+opponent on timeout or 4xx.
 
 ## Layout
 
@@ -69,6 +120,7 @@ crates/
   wargames-core/   # pure rules: state, engine, triggers, predictions
   wargames-tui/    # the binary: splash, picker, paned UI
 scenarios/         # scenario JSON (verbatim from the JS impl)
+examples/          # settings.sample.json (copiable starting config)
 scripts/           # install.sh (curl|bash) + smoke.sh
 docs/              # plan + learnings
 old_data/          # the previous JS implementation, archived

@@ -174,4 +174,57 @@ mod tests {
         let p = blumi_settings_path();
         assert!(p.ends_with(".blumi/settings.json"));
     }
+
+    /// The committed `examples/settings.sample.json` must round-trip through
+    /// `BlumiSettings::from_path` and yield non-empty providers + a router
+    /// whose `light` entry resolves. This pins the docs sample to the same
+    /// schema the binary consumes — if `examples/settings.sample.json`
+    /// drifts out of sync with `Provider`/`Router`/`RouterEntry`, this test
+    /// fails before any user copy-pastes a broken file into `~/.blumi/`.
+    #[test]
+    fn documented_sample_parses_and_resolves_router() {
+        // Walk up from `crates/wargames-tui/` to the workspace root, then
+        // into `examples/`. Cargo sets CARGO_MANIFEST_DIR at compile time.
+        let manifest = std::env::var("CARGO_MANIFEST_DIR")
+            .expect("CARGO_MANIFEST_DIR is set by cargo");
+        let sample = std::path::Path::new(&manifest)
+            .join("../../examples/settings.sample.json");
+        let s = BlumiSettings::from_path(&sample)
+            .unwrap_or_else(|e| panic!("sample at {} did not parse: {e}", sample.display()));
+        // At least one provider must be present and every one of them must
+        // have a non-empty api_key + base_url (the binary will reject empty
+        // keys silently on the wire).
+        assert!(!s.providers.0.is_empty(), "sample must list at least one provider");
+        for (name, p) in &s.providers.0 {
+            assert!(!p.api_key.is_empty(), "provider {name} has empty api_key");
+            assert!(!p.base_url.is_empty(), "provider {name} has empty base_url");
+        }
+        // router.light.{model,provider} must both resolve, and the named
+        // provider must exist — `from_settings` rejects unknown names.
+        let light_provider = s
+            .router
+            .light
+            .provider
+            .as_deref()
+            .expect("sample must set router.light.provider");
+        let light_model = s
+            .router
+            .light
+            .model
+            .clone()
+            .expect("sample must set router.light.model");
+        assert!(
+            s.provider(light_provider).is_some(),
+            "router.light.provider {light_provider:?} must reference a key under providers"
+        );
+        // `model` should also appear in the provider's `models` list — this
+        // is a documentation invariant, not strictly required by the loader,
+        // but if a user copy-pastes a `model` that the provider doesn't
+        // advertise they'll get opaque 4xx from the upstream API.
+        let prov = s.provider(light_provider).unwrap();
+        assert!(
+            prov.models.iter().any(|m| m == &light_model),
+            "router.light.model {light_model:?} must appear in providers.{light_provider}.models"
+        );
+    }
 }

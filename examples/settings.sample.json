@@ -1,0 +1,56 @@
+{
+  "_comment": "SAMPLE — wargames reads ~/.blumi/settings.json. Copy this file there, replace the PLACEHOLDER keys, and pick a provider under `providers` whose `api_key`/`base_url` you actually have. Fields wargames does NOT parse (everything except providers.*.{api_key, base_url, kind, models}, router.{light,heavy,judge}.{model,provider}, and voice.*) are harmless — they are read by other blumi apps on the same device. See README.md for which fields wargames uses.",
+  "providers": {
+    "minimax": {
+      "_comment": "Anthropic-compatible provider used by wargames. The `kind` field tells callers which request envelope to send; wargames always uses the anthropic Messages endpoint regardless of `kind`, so setting `kind: \"anthropic\"` for any MiniMax/Azure/OpenAI-direct-compatible endpoint is fine. `base_url` must NOT include `/v1/messages` — wargames appends it.",
+      "api_key": "PLACEHOLDER_MINIMAX_KEY",
+      "base_url": "https://api.minimax.io/anthropic",
+      "kind": "anthropic",
+      "models": [
+        "MiniMax-M3"
+      ]
+    },
+    "azure-foundry": {
+      "_comment": "Alternative Anthropic-compatible endpoint hosted on Azure AI Foundry.",
+      "api_key": "PLACEHOLDER_AZURE_KEY",
+      "base_url": "https://YOUR-RESOURCE.services.ai.azure.com/anthropic",
+      "kind": "anthropic",
+      "models": [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-5"
+      ]
+    },
+    "anthropic-direct": {
+      "_comment": "Direct Anthropic API as another option. `base_url` is the canonical host — wargames appends /v1/messages.",
+      "api_key": "PLACEHOLDER_ANTHROPIC_KEY",
+      "base_url": "https://api.anthropic.com",
+      "kind": "anthropic",
+      "models": [
+        "claude-haiku-4-5",
+        "claude-sonnet-4-5"
+      ]
+    }
+  },
+  "router": {
+    "_comment": "wargames reads ONLY `router.light.{model, provider}` to pick the default Soviet commander model at startup. `router.heavy` and `router.judge` are read by other blumi apps (cyberdeck etc.) and ignored here. The `provider` name must match a key under `providers`.",
+    "light": {
+      "model": "MiniMax-M3",
+      "provider": "minimax"
+    },
+    "heavy": {
+      "model": "claude-sonnet-4-5",
+      "provider": "anthropic-direct"
+    },
+    "judge": {
+      "model": "claude-haiku-4-5",
+      "provider": "anthropic-direct"
+    }
+  },
+  "voice": {
+    "_comment": "Optional. wargames never reads this — if present, TTS is best-effort by other apps. Leave the whole block out if you do not want TTS anywhere.",
+    "enabled": false,
+    "tts_api_key": "PLACEHOLDER_TTS_KEY",
+    "tts_voice": "en-US-AriaNeural",
+    "tts_provider": "azure"
+  }
+}
