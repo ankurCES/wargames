@@ -140,6 +140,14 @@ pub struct App {
     /// uses `Instant::now()` via the `App::new` constructor; the test-only
     /// `set_clock` helper exposes the seam to the test suite.
     pub clock: Box<dyn Fn() -> Instant + Send + Sync>,
+    /// Fade-out deadline for the receiving popup. After `opponent_pending` flips
+    /// `true → false` (the opponent just responded), set to `Some(now + 300ms)`.
+    /// The popup stays visible until the deadline expires, then clears. Player
+    /// commits cancel the fade (reset to `None`). Reads the `clock` seam.
+    pub receiving_popup_fade_at: Option<Instant>,
+    /// Last tick's `opponent_pending` value. Used to detect the `true → false`
+    /// edge so the fade starts on opponent-response, not on tick noise.
+    pub prev_opponent_pending: bool,
     pub game_over_message: Option<String>,
     pub scenarios_dir: PathBuf,
     pub status: String,
@@ -239,6 +247,8 @@ impl App {
             login: LoginState::new(),
             splash_started_at: Instant::now(),
             clock: Box::new(Instant::now),
+            receiving_popup_fade_at: None,
+            prev_opponent_pending: false,
             active_view: ViewKind::Map,
             pane_lock: PaneLock::default(),
             picker,
@@ -280,6 +290,41 @@ impl App {
 
     pub fn skip_splash(&mut self) {
         self.screen = Screen::Picker;
+    }
+
+    /// True iff the receiving popup should be painted this frame. Combines
+    /// `opponent_pending` (active wait) and `receiving_popup_fade_at` (lingering
+    /// fade). Render branch uses this single source of truth.
+    pub fn receiving_popup_visible(&self) -> bool {
+        if self.opponent_pending {
+            return true;
+        }
+        self.receiving_popup_fade_at
+            .is_some_and(|t| (self.clock)() < t)
+    }
+
+    /// Per-frame receiving-popup fade state machine. Called from `render`
+    /// (the run-loop tick) and exposed publicly so tests can drive the seam
+    /// directly without spinning up a `ratatui::Frame`.
+    ///
+    /// Two transitions:
+    ///   1. Edge: `opponent_pending` flipped `true → false` since the last
+    ///      tick → arm the 300 ms fade window.
+    ///   2. Expire: the fade instant has elapsed → clear the field.
+    ///
+    /// All "now" reads go through the `clock` seam — no `Instant::now()`
+    /// anywhere on this path.
+    pub fn tick_fade_transitions(&mut self) {
+        let now = (self.clock)();
+        let opp = self.opponent_pending;
+        if !opp && self.prev_opponent_pending {
+            self.receiving_popup_fade_at =
+                Some(now + Duration::from_millis(300));
+        }
+        if self.receiving_popup_fade_at.is_some_and(|t| now >= t) {
+            self.receiving_popup_fade_at = None;
+        }
+        self.prev_opponent_pending = opp;
     }
 
     /// Mark the run loop as busy with an LLM call. Drives the spinner.
@@ -1185,6 +1230,8 @@ impl App {
         // Mark that the opponent should respond next via the LLM. The actual
         // network call is fired from `main.rs`'s run loop when bg==Idle.
         self.opponent_pending = true;
+        // Player committed; cancel any in-flight fade.
+        self.receiving_popup_fade_at = None;
         // Refresh live radar contacts for the new turn.
         self.refresh_contacts();
         // Trigger an initial prediction immediately (cheap, sync).
@@ -1383,6 +1430,16 @@ impl App {
         if matches!(self.screen, Screen::Game) && self.mode.is_ai_vs_ai() {
             let _ = self.step_ai_vs_ai();
         }
+        // Receiving-popup fade transitions. Both Task 4 (fields + commit
+        // reset) and the transition wiring live in one place because they're
+        // inseparable — keeping them split would force the next reviewer to
+        // chase two commits for a single behaviour. `render` is the per-frame
+        // hook the run loop calls every frame
+        // (`terminal.draw(|f| app.render(f))` in `main.rs`), so it IS the
+        // tick from this app's perspective. The logic itself is delegated to
+        // `tick_fade_transitions` so tests can drive the seam directly
+        // without spinning up a ratatui Frame.
+        self.tick_fade_transitions();
         match self.screen {
             Screen::Login => {
                 render_login(frame, frame.area(), &self.login);
@@ -2147,6 +2204,59 @@ mod playable_flow_tests {
         assert!(
             t1 >= t0,
             "default clock should be monotonic non-decreasing (t0={t0:?}, t1={t1:?})"
+        );
+    }
+
+    /// The receiving-popup fade must clear deterministically after the
+    /// 300 ms window elapses, without `thread::sleep` or `#[ignore]`.
+    /// This is the payoff of the `ClockFn` seam added in `dae878c`:
+    /// the test drives a fake clock forward by 500 ms and asserts the
+    /// fade field has been cleared by the next tick — no wall-clock
+    /// wait, no flakiness, runs in CI on every commit.
+    #[test]
+    fn fade_clears_after_window_using_clock_seam() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        // A clock the test can advance manually. The closure hands
+        // out the current value; the test mutates it under a Mutex
+        // (the `clock` field requires `Send + Sync`).
+        let clock = Arc::new(Mutex::new(std::time::Instant::now()));
+        let clock_for_app = Arc::clone(&clock);
+
+        let mut app = App::new(
+            crate::config::BlumiSettings {
+                providers: Default::default(),
+                router: Default::default(),
+                voice: None,
+            },
+            std::path::PathBuf::from("/tmp"),
+        );
+        app.skip_splash();
+        app.set_clock(move || *clock_for_app.lock().unwrap());
+
+        // Simulate: opponent_pending was true last tick (so the next
+        // tick sees a true→false edge), now false.
+        app.prev_opponent_pending = true;
+        app.opponent_pending = false;
+        app.tick_fade_transitions(); // sets fade_at = now + 300ms
+        assert!(
+            app.receiving_popup_visible(),
+            "fade should be active immediately after the edge"
+        );
+
+        // Advance the fake clock past the 300 ms window.
+        *clock.lock().unwrap() =
+            std::time::Instant::now() + Duration::from_millis(500);
+        app.tick_fade_transitions(); // expires the fade
+
+        assert!(
+            !app.receiving_popup_visible(),
+            "fade should have cleared after 500ms (>300ms window)"
+        );
+        assert!(
+            app.receiving_popup_fade_at.is_none(),
+            "fade field must be reset to None on expiry"
         );
     }
 
