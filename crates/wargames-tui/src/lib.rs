@@ -29,6 +29,7 @@ pub mod widget_defcon;
 pub mod widget_log;
 pub mod widget_predict;
 pub mod widget_radar;
+pub mod widget_receiving_popup;
 pub mod widget_spinner;
 pub mod widget_state;
 pub mod widget_world;
