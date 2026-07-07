@@ -33,6 +33,9 @@ pub fn centered_rect(frame_area: Rect) -> Rect {
         .width
         .saturating_sub(popup_w)
         / 2;
+    // y = height - popup_h - 1 == height - 4  (with popup_h = 3).
+    // The extra `- 1` keeps a single-row gap between the popup's
+    // bottom border and the frame's bottom border.
     let y = frame_area.height.saturating_sub(popup_h + 1);
     Rect {
         x,
@@ -44,9 +47,10 @@ pub fn centered_rect(frame_area: Rect) -> Rect {
 
 /// Total popup width including border cells.
 fn popup_width() -> u16 {
-    // 1 (braille) + 1 (space) + label.len() + 2 (border) = label.len() + 4
-    // Pad to MIN_POPUP_WIDTH for visual breathing room.
-    (POPUP_LABEL.len() as u16 + 4).max(MIN_POPUP_WIDTH)
+    // 1 (braille) + 1 (space) + char count of label + 2 (border).
+    // The `…` ellipsis is 1 char (3 UTF-8 bytes), so we count
+    // chars not bytes. MIN_POPUP_WIDTH is the visual floor.
+    (POPUP_LABEL.chars().count() as u16 + 4).max(MIN_POPUP_WIDTH)
 }
 
 /// Total popup height (1 content row + 2 border rows).
@@ -98,12 +102,20 @@ mod tests {
     }
 
     #[test]
-    fn popup_width_is_at_least_minimum() {
-        assert!(popup_width() >= MIN_POPUP_WIDTH);
+    fn popup_width_equals_minimum_for_current_label() {
+        // The current label is short enough that the MIN_POPUP_WIDTH
+        // floor is the binding constraint. If anyone shortens the
+        // floor or lengthens the label, this pin breaks and forces
+        // a deliberate update.
+        assert_eq!(popup_width(), MIN_POPUP_WIDTH);
     }
 
     #[test]
-    fn popup_height_matches_minimum() {
-        assert_eq!(popup_height(), 3);
+    fn popup_height_equals_minimum_minus_one() {
+        // Popup height is exactly MIN_POPUP_HEIGHT - 1: 1 row of
+        // content + 2 rows of border. This encodes the invariant
+        // "borders add 2 rows" so a future change to either
+        // MIN_POPUP_HEIGHT or popup_height() must be conscious.
+        assert_eq!(popup_height(), MIN_POPUP_HEIGHT - 1);
     }
 }
