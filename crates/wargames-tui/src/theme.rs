@@ -166,6 +166,7 @@ impl ThemeName {
     }
 
     /// Human-readable label shown in the Settings tab list.
+    #[allow(dead_code)] // Surfaced in the Settings tab once the theme picker UI lands.
     pub fn label(self) -> &'static str {
         match self {
             ThemeName::OgWopr => "OG WOPR",

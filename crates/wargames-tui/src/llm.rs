@@ -44,6 +44,7 @@ impl LlmClient {
     /// Decide the Soviet commander's next action. Bounded by the 12 s
     /// ceiling; on timeout the caller gets `None` and falls back to a
     /// deterministic action.
+    #[allow(dead_code)] // Wired through Phase::Game's LLM client once the heuristic opponent is replaced.
     pub async fn decide(&self, system: &str, user: &str) -> Option<CommanderAction> {
         let body = MessagesRequest {
             model: &self.model,
@@ -982,6 +983,7 @@ enum ContentBlock {
         name: String,
         input: serde_json::Value,
     },
+    #[allow(dead_code)] // Held over from the streaming-buffer spec; no consumer reads .text yet.
     Text {
         text: String,
     },

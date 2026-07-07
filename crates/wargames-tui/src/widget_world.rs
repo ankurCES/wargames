@@ -384,7 +384,7 @@ fn draw_line(
     let (x1, y1) = project(lat1, lon1, w, h);
     let (x2, y2) = project(lat2, lon2, w, h);
     // Bresenham — handle wraparound (longitudes can wrap ±180).
-    let (mut x1, mut y1, x2, mut y2) = (x1 as i32, y1 as i32, x2 as i32, y2 as i32);
+    let (mut x1, mut y1, x2, y2) = (x1 as i32, y1 as i32, x2 as i32, y2 as i32);
     let dx = (x2 - x1).abs();
     let dy = -(y2 - y1).abs();
     let sx = if x1 < x2 { 1 } else { -1 };

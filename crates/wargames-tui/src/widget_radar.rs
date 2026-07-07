@@ -63,6 +63,7 @@ const SAMPLE_SIDES: &[ContactSide] = &[
     ContactSide::Neutral,
 ];
 
+#[allow(dead_code)] // Responsive-layout threshold; reused once the single-column gate is hooked to layout().
 const MIN_WIDTH_FOR_FULL: u16 = 60;
 
 /// Render the radar pane. Pass `&[]` when no contacts are known yet
@@ -441,6 +442,7 @@ fn render_table_fallback(
 }
 
 impl ContactSide {
+    #[allow(dead_code)] // Held over for a future radar legend; not consumed by the renderer today.
     fn label(self) -> &'static str {
         match self {
             ContactSide::Us => "us",

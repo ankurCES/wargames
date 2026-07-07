@@ -2,10 +2,10 @@
 //! inside its box when the user pages up/down, and surfaces a "N chars
 //! more" hint when overflow occurs.
 
-use crate::text::{self, overflow_hint_line, wrap_to_width};
+use crate::text::wrap_to_width;
 use crate::theme;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
@@ -125,7 +125,7 @@ pub fn render(
             let is_ltr_comm = is_first
                 && entry.kind == "comm"
                 && !entry.language.is_rtl();
-            let mut row: Vec<Span<'static>> = if is_first {
+            let row: Vec<Span<'static>> = if is_first {
                 let mut spans = vec![Span::styled(header.clone(), header_style)];
                 // LTR comm: "[  1] opp   comm    ▸ мы готовимся"
                 // RTL comm: "[  1] opp   comm    мы готовимся ◂"
@@ -244,6 +244,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text;
     use wargames_core::language::Language;
     use wargames_core::log::LogEntry;
 

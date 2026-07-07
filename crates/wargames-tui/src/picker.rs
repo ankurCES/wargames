@@ -294,6 +294,7 @@ impl Picker {
         }
     }
 
+    #[allow(dead_code)] // Surfaced once the picker shows the active mode in a side panel.
     pub fn selected_mode(&self) -> Option<&ModeEntry> {
         self.modes.get(self.mode_idx)
     }

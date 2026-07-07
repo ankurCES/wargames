@@ -20,7 +20,7 @@
 
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-use crate::widget_action;
+
 
 /// Width below which we give up and ask the user to enlarge the terminal.
 /// 24 cols is the smallest width at which any of the four game widgets
@@ -256,6 +256,7 @@ impl Default for PaneLock {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Left,
+    #[allow(dead_code)] // Reserved for a future right-pane picker; only `Left` is wired today.
     Right,
 }
 

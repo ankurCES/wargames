@@ -23,7 +23,7 @@
 
 use crate::theme;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
@@ -121,6 +121,7 @@ pub fn format_elapsed(started_at: Instant) -> String {
 /// Render a fixed-start placeholder — used by tests that want a stable
 /// elapsed-string without depending on wall-clock time.
 #[cfg(test)]
+#[allow(dead_code)] // Test-only helper exposed so tests can pin the spinner start instant.
 pub fn fixed_started_at() -> Instant {
     static FIXED: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     *FIXED.get_or_init(Instant::now)

@@ -7,9 +7,9 @@
 
 use crate::config::BlumiSettings;
 use crate::llm::LlmClient;
-use crate::login::{LoginState, Phase, render_login};
+use crate::login::{LoginState, render_login};
 use crate::panes::{
-    game_layout, view_layout, Breakpoint, GameRects, PaneKind, PaneLock, ViewKind,
+    game_layout, Breakpoint, GameRects, PaneKind, PaneLock, ViewKind,
 };
 use crate::panes::Side as PaneSide;
 use crate::picker::{
@@ -30,7 +30,6 @@ use ratatui::widgets::ListState;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use wargames_core::engine::apply_action;
-use wargames_core::language::Language;
 use wargames_core::log::LogEntry;
 use wargames_core::predict::predict;
 use wargames_core::scenario::Scenario;
@@ -39,6 +38,7 @@ use wargames_core::{Action, Faction, Posture, Side, SideState};
 use wargames_core::WorldState;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)] // Splash is wired through `Phase` in a follow-up.
 pub enum Screen {
     /// WOPR-style Joshua auth gate. First thing the user sees.
     Login,
@@ -128,8 +128,10 @@ pub struct App {
     pub world: Option<WorldState>,
     pub scenario: Option<Scenario>,
     pub scenario_entry: Option<ScenarioEntry>,
+    #[allow(dead_code)] // Spec-driven: settings UI surfaces it once Phase::Settings lands.
     pub settings: BlumiSettings,
     pub llm: Option<LlmClient>,
+    #[allow(dead_code)] // TTS is wired through `speak` in a follow-up once ElevenLabs key is set.
     pub tts: Tts,
     pub last_prediction: Option<wargames_core::Prediction>,
     pub last_prediction_at: Option<Instant>,
@@ -1564,7 +1566,7 @@ impl App {
     }
 
     fn render_game_over(&self, frame: &mut ratatui::Frame) {
-        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
         let area = frame.area();
@@ -1602,7 +1604,7 @@ impl App {
     /// meaningfully. Tells the user the current dimensions and the minimum
     /// we need (`MIN_WIDTH` × `MIN_HEIGHT`).
     fn render_too_small(&self, frame: &mut ratatui::Frame, area: Rect) {
-        use ratatui::style::{Color, Modifier, Style};
+        use ratatui::style::{Modifier, Style};
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
         frame.render_widget(Clear, area);
@@ -1793,6 +1795,7 @@ impl App {
 /// This is app-internal: it's intentionally not in `text` because no other
 /// widget wants "keep the tail" semantics; the rest of the codebase uses
 /// `text::truncate_with_ellipsis` for head-anchored truncation.
+#[allow(dead_code)] // Reserved for the status-line overflow fallback; not yet called from `render_status_line`.
 fn fit_to_status_width(s: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -2068,10 +2071,10 @@ mod playable_flow_tests {
     //! block will experience — and it is the path the smoke script can't
     //! exercise (which runs 200 ms with Esc and exits).
     use super::*;
-    use crate::config::BlumiSettings;
     use crate::picker::PickerStep;
     use std::path::PathBuf;
     use wargames_core::Action;
+    use wargames_core::language::Language;
 
     /// Build an `App` against the live `scenarios/` directory using an empty
     /// `BlumiSettings` (no LLM client → heuristic opponent). Returning a

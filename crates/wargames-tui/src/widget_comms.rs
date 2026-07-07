@@ -467,8 +467,8 @@ mod tests {
             .expect("render");
         let buf = terminal.backend().buffer().clone();
         let s = buffer_string(&buf);
-        assert!(s.contains("TRIGGER PAYLOAD") == false, "trigger leaked into comms: {s}");
-        assert!(s.contains("OUTCOME PAYLOAD") == false, "outcome leaked into comms: {s}");
+        assert!(!s.contains("TRIGGER PAYLOAD"), "trigger leaked into comms: {s}");
+        assert!(!s.contains("OUTCOME PAYLOAD"), "outcome leaked into comms: {s}");
         assert!(s.contains("visible"), "comm message missing: {s}");
     }
 

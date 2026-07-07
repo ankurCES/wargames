@@ -9,7 +9,7 @@
 //! maps to the three `state_value_*` roles (ok → warn → crit) and a
 //! fallback "off the chart" magenta inherited from the seed themes.
 
-use crate::text::{self, pad_right, wrap_to_width};
+use crate::text::{pad_right, wrap_to_width};
 use crate::theme;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -177,6 +177,7 @@ fn bar(pct: u16, color: Color, width: usize) -> Vec<Span<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text;
 
     #[test]
     fn bar_uses_requested_width() {

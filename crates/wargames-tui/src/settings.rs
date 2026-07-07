@@ -160,6 +160,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut SettingsState) {
 
 /// Look up a theme by slug. Returns `None` if no seeded theme matches;
 /// callers fall back to `og_wopr()` themselves.
+#[allow(dead_code)] // Used by the planned settings UI when themes become user-selectable.
 pub fn by_name_or_default(slug: &str) -> Theme {
     theme::by_name(slug)
 }

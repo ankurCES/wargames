@@ -10,6 +10,12 @@
 //!
 //! Missing file → exit code 2 (not 1). 1 is reserved for "the model
 //! said no"; 2 means "the environment is not set up".
+//!
+//! Spec-driven fields (light/heavy/judge router entries, TTS provider,
+//! Voice struct) are part of the settings.json schema even when no
+//! caller reads them yet — keep them deserialisable so a settings.json
+//! authored against the full schema still loads.
+#![allow(dead_code)]
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};

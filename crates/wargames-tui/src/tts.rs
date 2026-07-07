@@ -1,5 +1,10 @@
 //! Optional ElevenLabs TTS client. Fails soft when the voice section is
 //! missing — the TUI prints "(tts disabled)" instead of speaking.
+//!
+//! The whole module is feature-staged: API key + voice are loaded from
+//! settings but the network call is gated behind a future ElevenLabs
+//! setup step. Suppressing dead_code here is a deliberate hold-over.
+#![allow(dead_code)]
 
 use crate::config::BlumiSettings;
 use crate::net::with_ceiling;

@@ -7,7 +7,7 @@
 use crate::text::truncate_with_ellipsis;
 use crate::theme;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
 use ratatui::Frame;
@@ -73,6 +73,7 @@ pub fn widest_row_width() -> u16 {
 /// Inner width the action panel should occupy — never less than the
 /// floor, never more than the widest content. The panes layout asks
 /// for `widest_row_width()` and caps by its available column budget.
+#[allow(dead_code)] // Held over from a planned responsive layout pass; not called from the current render path.
 pub fn desired_inner_width() -> u16 {
     widest_row_width().max(ACTION_PANEL_MIN_INNER_WIDTH)
 }
