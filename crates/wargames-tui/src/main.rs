@@ -23,6 +23,7 @@ mod widget_defcon;
 mod widget_log;
 mod widget_predict;
 mod widget_radar;
+mod widget_receiving_popup;
 mod widget_spinner;
 mod widget_state;
 mod widget_world;

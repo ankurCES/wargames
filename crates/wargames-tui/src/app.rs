@@ -23,6 +23,7 @@ use crate::widget_action::{render as render_action, ALL_ACTIONS};
 use crate::widget_log::{self, render as render_log};
 use crate::widget_predict::render as render_predict;
 use crate::widget_radar::{self, render as render_radar, Contact};
+use crate::widget_receiving_popup;
 use crate::widget_spinner;
 use crate::widget_state::render as render_state;
 use ratatui::layout::Rect;
@@ -1509,6 +1510,13 @@ impl App {
                         _ => {}
                     }
                 }
+                // Receiving popup (Task 6). Paints last so it sits on top of
+                // the game widgets AND the bottom-right spinner. Visible whenever
+                // `opponent_pending` is true OR the fade window is still open.
+                // The widget does its own no-op on sub-minimum frames.
+                if self.receiving_popup_visible() {
+                    widget_receiving_popup::render(frame, frame.area(), self.spinner_frame);
+                }
             }
             Screen::GameOver => {
                 self.render_game_over(frame);
@@ -2329,6 +2337,67 @@ mod playable_flow_tests {
         assert!(
             app.last_prediction.is_some(),
             "commit_action must refresh prediction"
+        );
+    }
+
+    /// RENDER-WIRING proof that `widget_receiving_popup::render` paints the
+    /// "RECEIVING OPPONENT RESPONSE…" label into the terminal buffer when
+    /// `App::receiving_popup_visible()` returns true. This is the wire-up
+    /// half of Task 6's contract: the paint call inside `Screen::Game` is
+    /// actually called by the real render loop and actually produces the
+    /// expected glyphs on screen.
+    #[test]
+    fn receiving_popup_paints_label_when_visible() {
+        use ratatui::Terminal;
+        use ratatui::TerminalOptions;
+        use ratatui::Viewport;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions { viewport: Viewport::Fullscreen },
+        )
+        .expect("TestBackend terminal constructs");
+
+        let mut app = fresh_app();
+        // Drive to the game screen so `App::render` takes the `Screen::Game`
+        // branch where the wiring lives.
+        app.handle_picker_key(KeyCode::Enter); // Mode
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        assert_eq!(app.screen, Screen::Game);
+
+        // Force the popup visible. This is the canonical active-wait state
+        // (`opponent_pending == true` immediately after `commit_action`).
+        app.opponent_pending = true;
+        app.tick_fade_transitions(); // refresh prev_opponent_pending shadow
+        assert!(
+            app.receiving_popup_visible(),
+            "test setup: helper must report the popup visible"
+        );
+
+        terminal
+            .draw(|f| app.render(f))
+            .expect("App::render on Screen::Game succeeds");
+
+        // Walk the buffer's `content` slice (mirrors the pattern in
+        // `fresh_picker_render_does_not_show_phantom_empty_state` above and
+        // `widget_comms::tests::buffer_string`). Slicing by chars avoids the
+        // multi-byte box-drawing glyph trap.
+        let backend = terminal.backend();
+        let buf = backend.buffer().clone();
+        let rendered: String = buf
+            .content()
+            .iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+
+        assert!(
+            rendered.contains("RECEIVING OPPONENT RESPONSE"),
+            "popup label must paint into the buffer when receiving_popup_visible() is true; \
+             rendered tail: {:?}",
+            &rendered[rendered.len().saturating_sub(400)..]
         );
     }
 
