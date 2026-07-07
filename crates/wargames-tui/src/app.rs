@@ -135,6 +135,11 @@ pub struct App {
     pub tts: Tts,
     pub last_prediction: Option<wargames_core::Prediction>,
     pub last_prediction_at: Option<Instant>,
+    /// Time source for the receiving-popup fade. Tests inject a fixed-or-shifting
+    /// clock so the fade-clear timing can be asserted deterministically. Production
+    /// uses `Instant::now()` via the `App::new` constructor; the test-only
+    /// `set_clock` helper exposes the seam to the test suite.
+    pub clock: Box<dyn Fn() -> Instant + Send + Sync>,
     pub game_over_message: Option<String>,
     pub scenarios_dir: PathBuf,
     pub status: String,
@@ -233,6 +238,7 @@ impl App {
             screen: Screen::Login,
             login: LoginState::new(),
             splash_started_at: Instant::now(),
+            clock: Box::new(Instant::now),
             active_view: ViewKind::Map,
             pane_lock: PaneLock::default(),
             picker,
@@ -1786,6 +1792,20 @@ impl App {
     }
 }
 
+#[cfg(test)]
+impl App {
+    /// Replace the clock seam with a custom time source. Test-only.
+    /// Lets a test drive the receiving-popup fade timing by handing in a
+    /// closure that returns a fake-or-shifting `Instant` instead of
+    /// sleeping for real wall-clock milliseconds.
+    #[allow(dead_code)] // Wired in by Task 7's fade-clear test; nothing in the
+                        // current test suite calls it yet — keep the seam
+                        // available without raising a warning every build.
+    pub fn set_clock<F: Fn() -> Instant + Send + Sync + 'static>(&mut self, f: F) {
+        self.clock = Box::new(f);
+    }
+}
+
 /// Fit `s` to `max` terminal cells by keeping the **tail** (latest streamed
 /// tokens) and dropping characters from the front. Counts display width
 /// instead of bytes so multi-byte UTF-8 (em-dashes, ideographs, etc.)
@@ -2112,6 +2132,22 @@ mod playable_flow_tests {
         app.skip_splash();
         app.bg = BgOp::Idle;
         app
+    }
+
+    /// Default clock seam must be a working `Instant::now` source.
+    /// Two consecutive calls return non-decreasing instants — a
+    /// property the receiving-popup fade-clear test will rely on
+    /// (and that the test-only `set_clock` helper must preserve
+    /// when a test substitutes a fake clock).
+    #[test]
+    fn app_default_clock_returns_monotonic_instants() {
+        let app = fresh_app();
+        let t0 = (app.clock)();
+        let t1 = (app.clock)();
+        assert!(
+            t1 >= t0,
+            "default clock should be monotonic non-decreasing (t0={t0:?}, t1={t1:?})"
+        );
     }
 
     #[test]
