@@ -2268,6 +2268,116 @@ mod playable_flow_tests {
         );
     }
 
+    /// RESTART-DURING-FADE proof that `commit_action` resets the fade
+    /// window. Scenario: opponent just responded (fade armed), player
+    /// commits again before the 300ms fade window elapses. The fade
+    /// field must drop to `None` so the popup stays visible (no
+    /// flicker-off-then-on as the fade would otherwise expire mid-commit).
+    ///
+    /// This is the integration test that pins the
+    /// `receiving_popup_fade_at = None` reset added in `4c4b7e4`. We
+    /// drive the *real* `commit_action` path (via
+    /// `handle_game_key(Enter)` after the 3-picker-key dance the sibling
+    /// test `commit_action_advances_turn_and_requests_opponent` uses),
+    /// not a hand-rolled copy of its reset line — that's the only way
+    /// to catch a regression where the reset drifts out of
+    /// `commit_action`.
+    #[test]
+    fn commit_action_during_fade_resets_fade_window() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        // Fake clock the test can advance manually — mirrors
+        // `fade_clears_after_window_using_clock_seam` so we never
+        // `thread::sleep` and never `#[ignore]`.
+        let clock = Arc::new(Mutex::new(std::time::Instant::now()));
+        let clock_for_app = Arc::clone(&clock);
+
+        let mut app = fresh_app();
+        // Drive to the game screen so `commit_action` has a real
+        // action / world to apply. Same setup as
+        // `commit_action_advances_turn_and_requests_opponent`.
+        app.handle_picker_key(KeyCode::Enter); // Mode
+        app.handle_picker_key(KeyCode::Enter); // Country
+        app.handle_picker_key(KeyCode::Enter); // Scenario
+        assert_eq!(app.screen, Screen::Game, "picker must land on Game");
+
+        // Substitute the fake clock BEFORE any fade-bearing tick so
+        // `tick_fade_transitions` arms the window against the seam.
+        app.set_clock(move || *clock_for_app.lock().unwrap());
+
+        // First commit: player acts, opp is now pending. Real path.
+        app.handle_game_key(KeyCode::Enter);
+        assert!(
+            app.opponent_pending,
+            "first commit must request opponent response"
+        );
+        assert!(
+            app.receiving_popup_fade_at.is_none(),
+            "fresh commit has no fade yet (fade is armed on the true→false edge)"
+        );
+
+        // Simulate opponent just responded: `opponent_pending` flips
+        // false. Set `prev_opponent_pending = true` manually so the
+        // next `tick_fade_transitions` detects the true→false edge
+        // and arms the 300ms fade window.
+        app.opponent_pending = false;
+        app.prev_opponent_pending = true;
+        app.tick_fade_transitions();
+        assert!(
+            app.receiving_popup_fade_at.is_some(),
+            "fade must be armed after the true→false edge"
+        );
+        assert!(
+            app.receiving_popup_visible(),
+            "popup must be visible during the fade window"
+        );
+
+        // Advance the fake clock by 100ms — still well inside the
+        // 300ms window. We must NOT have hit expiry, so the fade is
+        // still armed and a hand-rolled tick would clear it.
+        *clock.lock().unwrap() =
+            std::time::Instant::now() + Duration::from_millis(100);
+        app.tick_fade_transitions();
+        assert!(
+            app.receiving_popup_fade_at.is_some(),
+            "100ms is inside the 300ms window — fade must still be armed"
+        );
+
+        // THE ACT: player commits AGAIN while the fade is still
+        // active. This is exactly the restart-during-fade scenario.
+        // `handle_game_key(Enter)` dispatches to the real
+        // `commit_action`, which must reset the fade window.
+        app.handle_game_key(KeyCode::Enter);
+
+        // The contract under test: the fade field is None after a
+        // re-commit, even if the previous fade had not yet expired.
+        // If this ever fails, the popup would flicker off (fade
+        // expires naturally mid-commit) and then back on
+        // (`opponent_pending` set true again) — visually jarring.
+        assert!(
+            app.receiving_popup_fade_at.is_none(),
+            "re-commit must reset fade_at even while a fade was still active"
+        );
+        assert!(
+            app.opponent_pending,
+            "re-commit must request another opponent response"
+        );
+        assert!(
+            app.receiving_popup_visible(),
+            "popup must stay visible after re-commit (opp_pending=true)"
+        );
+
+        // Also verify the fade doesn't re-arm spuriously on the next
+        // tick now that opp is still pending — we want a clean
+        // re-commit, not a false edge.
+        app.tick_fade_transitions();
+        assert!(
+            app.receiving_popup_fade_at.is_none(),
+            "no false edge while opp_pending stays true"
+        );
+    }
+
     #[test]
     #[ignore = "touches /tmp fixtures; run with `cargo test -- --ignored`"]
     fn fixture_layout_probe() {
