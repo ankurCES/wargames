@@ -10,9 +10,11 @@
 //! - [`panes`]: herdr-style 2x2 + log layout.
 //! - [`widget_state`], [`widget_predict`], [`widget_log`], [`widget_action`], [`widget_radar`].
 
+pub mod app;
 pub mod config;
 pub mod llm;
 pub mod net;
+pub mod login;
 pub mod panes;
 pub mod picker;
 pub mod settings;
@@ -20,8 +22,13 @@ pub mod splash;
 pub mod text;
 pub mod theme;
 pub mod tts;
+pub mod ui_anim;
 pub mod widget_action;
+pub mod widget_comms;
+pub mod widget_defcon;
 pub mod widget_log;
 pub mod widget_predict;
 pub mod widget_radar;
+pub mod widget_spinner;
 pub mod widget_state;
+pub mod widget_world;

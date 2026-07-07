@@ -155,6 +155,251 @@ impl Default for PaneKind {
     }
 }
 
+/// The high-level game views the player cycles between with Tab /
+/// Shift+Tab. Distinct from `PaneKind` (which describes the legacy
+/// 2×2 + log layout) — these are the *new* WOPR-style game screens
+/// that share the body area, one or two at a time, depending on
+/// the `PaneLock` mode.
+///
+/// `Settings` is intentionally *not* in `tab_order` — it's an
+/// overlay reached via the `s` key and z-indexed over the game
+/// view. Tab cycling stays focused on the four gameplay screens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ViewKind {
+    /// ASCII world map (continent outlines + strategic cities).
+    Map,
+    /// Side-channel messages, multi-language.
+    Comms,
+    /// DEFCON escalation gauge + threat ladder.
+    Defcon,
+    /// Active threats + missile trajectories overlay.
+    Threats,
+    /// Settings overlay (always reachable via `s` key, never via
+    /// tab cycle).
+    Settings,
+}
+
+impl ViewKind {
+    /// Tab-cyclable variants in their canonical order. `Settings`
+    /// is excluded — see the type docs for why.
+    pub fn tab_order() -> &'static [ViewKind] {
+        &[ViewKind::Map, ViewKind::Comms, ViewKind::Defcon, ViewKind::Threats]
+    }
+
+    /// Next tab-cyclable view clockwise (Tab). Wraps around.
+    /// If the caller is currently in a non-cyclable view
+    /// (`Settings` today), we land on `Map` so the user always
+    /// re-enters the cycle at the top.
+    pub fn next(self) -> Self {
+        let order = Self::tab_order();
+        match order.iter().position(|v| *v == self) {
+            Some(idx) => order[(idx + 1) % order.len()],
+            None => ViewKind::Map,
+        }
+    }
+
+    /// Previous tab-cyclable view (Shift+Tab). Wraps around.
+    /// Non-cyclable callers land on `Threats` (last in cycle)
+    /// so `prev` moves them down the cycle, mirroring `next`.
+    pub fn prev(self) -> Self {
+        let order = Self::tab_order();
+        match order.iter().position(|v| *v == self) {
+            Some(idx) => {
+                let prev = if idx == 0 { order.len() - 1 } else { idx - 1 };
+                order[prev]
+            }
+            None => ViewKind::Threats,
+        }
+    }
+
+    /// Short label used in titles, tab strips, and tests.
+    pub fn label(self) -> &'static str {
+        match self {
+            ViewKind::Map => "MAP",
+            ViewKind::Comms => "COMMS",
+            ViewKind::Defcon => "DEFCON",
+            ViewKind::Threats => "THREATS",
+            ViewKind::Settings => "SETTINGS",
+        }
+    }
+}
+
+impl Default for ViewKind {
+    fn default() -> Self {
+        ViewKind::Map
+    }
+}
+
+/// How the body area is partitioned across the active view(s).
+///
+/// - `Split(side)`: two tab-cyclable views share the body —
+///   `side` says which one is currently *visually* the primary
+///   (gets the wider column). The non-primary sits on the
+///   other side at ~40% width.
+/// - `Full(view)`: a single view occupies the full body width.
+///   Triggered when the player presses Enter on a tab in
+///   `Split` mode, or when the breakpoint is too narrow to
+///   support a sensible side-by-side render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneLock {
+    Split(Side),
+    Full(ViewKind),
+}
+
+impl Default for PaneLock {
+    fn default() -> Self {
+        PaneLock::Split(Side::Left)
+    }
+}
+
+/// Which side of a split pane is the visual primary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// The rectangles a `PaneLock` mode needs to paint.
+///
+/// In `Split` mode, `primary` and `secondary` are populated and
+/// `divider` is a 1-col vertical strip between them. In `Full`
+/// mode, `primary` holds the entire body and `secondary` and
+/// `divider` are zero-sized `Rect::default()`.
+///
+/// `breakpoint` is the body's breakpoint so callers can scale
+/// content (e.g. comms widget caps its visible lines lower on
+/// narrow screens).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewRects {
+    pub breakpoint: Breakpoint,
+    pub body: Rect,
+    /// The currently-focused view (always populated).
+    pub primary: ViewRect,
+    /// The paired view in `Split` mode; `Rect::default()` in `Full`.
+    pub secondary: ViewRect,
+    /// The 1-col divider between primary and secondary in
+    /// `Split` mode; `Rect::default()` in `Full`.
+    pub divider: Rect,
+    pub mode: PaneLock,
+}
+
+/// One pane in the split layout — kind + its rectangle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewRect {
+    pub view: ViewKind,
+    pub area: Rect,
+}
+
+impl ViewRect {
+    pub const fn empty(view: ViewKind) -> Self {
+        Self {
+            view,
+            area: Rect::new(0, 0, 0, 0),
+        }
+    }
+}
+
+/// Compute the rectangles for the active `PaneLock` mode. Mirrors
+/// the breakpoint-aware split style of `game_layout`:
+/// - `TooSmall` returns a single zero-area body — caller paints
+///   the "Terminal too small" overlay instead.
+/// - `Compact` always uses `Full` (no room for two side-by-side
+///   widgets without clipping).
+/// - `Medium`/`Wide` honor the requested `PaneLock` mode.
+///
+/// Never panics; `area.width=0` returns zero-sized rects.
+pub fn view_layout(area: Rect, active: ViewKind, mode: PaneLock) -> ViewRects {
+    let breakpoint = Breakpoint::classify(area);
+
+    // TooSmall — caller paints an overlay; we hand back a single
+    // empty body so renderers can early-return.
+    if matches!(breakpoint, Breakpoint::TooSmall) {
+        return ViewRects {
+            breakpoint,
+            body: area,
+            primary: ViewRect::empty(active),
+            secondary: ViewRect::empty(active),
+            divider: Rect::default(),
+            mode,
+        };
+    }
+
+    // Compact — single-column mode always uses Full. There's no
+    // sensible way to split two views side-by-side at ≤80 cols
+    // and still keep any text legible.
+    if matches!(breakpoint, Breakpoint::Compact) {
+        return ViewRects {
+            breakpoint,
+            body: area,
+            primary: ViewRect { view: active, area },
+            secondary: ViewRect::empty(active),
+            divider: Rect::default(),
+            mode: PaneLock::Full(active),
+        };
+    }
+
+    // Medium / Wide — honor the mode.
+    match mode {
+        PaneLock::Full(view) => ViewRects {
+            breakpoint,
+            body: area,
+            primary: ViewRect { view, area },
+            secondary: ViewRect::empty(view),
+            divider: Rect::default(),
+            mode: PaneLock::Full(view),
+        },
+        PaneLock::Split(side) => {
+            // Split body into primary (~60%) + divider (1 col) +
+            // secondary (~40%). Widths are clamped so neither
+            // side gets less than 24 cells when there's room.
+            let total = area.width;
+            let primary_w = (total * 3 / 5).max(24).min(total);
+            let divider_w: u16 = 1;
+            let secondary_w = total.saturating_sub(primary_w + divider_w);
+            let (left_area, right_area, divider) = if side == Side::Left {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Length(primary_w),
+                        Constraint::Length(divider_w),
+                        Constraint::Min(secondary_w),
+                    ])
+                    .split(area);
+                (cols[0], cols[2], cols[1])
+            } else {
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([
+                        Constraint::Min(secondary_w),
+                        Constraint::Length(divider_w),
+                        Constraint::Length(primary_w),
+                    ])
+                    .split(area);
+                (cols[2], cols[0], cols[1])
+            };
+            // Pick a sensible partner view for the secondary slot.
+            // Comms is the canonical pair with Map (a la WOPR's
+            // world-map + side-channel stream). DEFCON pairs with
+            // Threats by default.
+            let partner = match active {
+                ViewKind::Map => ViewKind::Comms,
+                ViewKind::Comms => ViewKind::Map,
+                ViewKind::Defcon => ViewKind::Threats,
+                ViewKind::Threats => ViewKind::Defcon,
+                ViewKind::Settings => ViewKind::Map,
+            };
+            ViewRects {
+                breakpoint,
+                body: area,
+                primary: ViewRect { view: active, area: left_area },
+                secondary: ViewRect { view: partner, area: right_area },
+                divider,
+                mode: PaneLock::Split(side),
+            }
+        }
+    }
+}
+
 /// Compute the `GameRects` for an arbitrary area. Always returns
 /// rectangles fully contained in `area`; never panics on `area.width=0`.
 ///
@@ -665,5 +910,176 @@ mod tests {
         // tab_order excludes Action.
         assert_eq!(PaneKind::tab_order().len(), 3);
         assert!(!PaneKind::tab_order().contains(&Action));
+    }
+
+    // ─── ViewKind / PaneLock / view_layout tests ─────────────────────
+
+    #[test]
+    fn view_kind_tab_order_excludes_settings() {
+        let order = ViewKind::tab_order();
+        assert_eq!(order.len(), 4);
+        assert!(order.contains(&ViewKind::Map));
+        assert!(order.contains(&ViewKind::Comms));
+        assert!(order.contains(&ViewKind::Defcon));
+        assert!(order.contains(&ViewKind::Threats));
+        assert!(!order.contains(&ViewKind::Settings));
+    }
+
+    #[test]
+    fn view_kind_next_wraps_around_cycle() {
+        use ViewKind::*;
+        assert_eq!(Map.next(), Comms);
+        assert_eq!(Comms.next(), Defcon);
+        assert_eq!(Defcon.next(), Threats);
+        assert_eq!(Threats.next(), Map);
+    }
+
+    #[test]
+    fn view_kind_prev_wraps_around_cycle() {
+        use ViewKind::*;
+        assert_eq!(Map.prev(), Threats);
+        assert_eq!(Threats.prev(), Defcon);
+        assert_eq!(Defcon.prev(), Comms);
+        assert_eq!(Comms.prev(), Map);
+    }
+
+    #[test]
+    fn view_kind_settings_is_reachable_but_not_in_cycle() {
+        // Settings.next() should land on a tab-cyclable view (Map)
+        // so the player re-enters the cycle at the top after
+        // closing settings.
+        assert_eq!(ViewKind::Settings.next(), ViewKind::Map);
+    }
+
+    #[test]
+    fn view_kind_default_is_map() {
+        assert_eq!(ViewKind::default(), ViewKind::Map);
+    }
+
+    #[test]
+    fn view_layout_too_small_returns_empty_primary() {
+        let tiny = Rect { x: 0, y: 0, width: 20, height: 7 };
+        let r = view_layout(tiny, ViewKind::Map, PaneLock::Split(Side::Left));
+        assert_eq!(r.breakpoint, Breakpoint::TooSmall);
+        assert_eq!(r.primary.area.width, 0);
+        assert_eq!(r.secondary.area.width, 0);
+        assert_eq!(r.divider.width, 0);
+    }
+
+    #[test]
+    fn view_layout_compact_always_promotes_to_full() {
+        let area = Rect { x: 0, y: 0, width: 80, height: 24 };
+        // Caller asks for Split at Compact — we promote to Full
+        // because there's no room to split legibly.
+        let r = view_layout(area, ViewKind::Map, PaneLock::Split(Side::Left));
+        assert_eq!(r.breakpoint, Breakpoint::Compact);
+        assert!(matches!(r.mode, PaneLock::Full(_)));
+        assert_eq!(r.primary.view, ViewKind::Map);
+        assert_eq!(r.primary.area.width, area.width);
+        assert_eq!(r.secondary.area.width, 0);
+        assert_eq!(r.divider.width, 0);
+    }
+
+    #[test]
+    fn view_layout_full_paints_one_view_at_body_width() {
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let r = view_layout(area, ViewKind::Comms, PaneLock::Full(ViewKind::Comms));
+        assert_eq!(r.primary.view, ViewKind::Comms);
+        assert_eq!(r.primary.area, area);
+        assert_eq!(r.secondary.area.width, 0);
+        assert_eq!(r.divider.width, 0);
+    }
+
+    #[test]
+    fn view_layout_split_partitions_body_with_divider() {
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let r = view_layout(area, ViewKind::Map, PaneLock::Split(Side::Left));
+        assert!(matches!(r.mode, PaneLock::Split(_)));
+        // Primary wider than secondary.
+        assert!(r.primary.area.width > r.secondary.area.width);
+        // Divider is exactly 1 column.
+        assert_eq!(r.divider.width, 1);
+        // All three (primary + divider + secondary) span the body
+        // without gaps or overlap.
+        assert_eq!(
+            r.primary.area.x + r.primary.area.width + r.divider.width
+                + r.secondary.area.width,
+            area.width
+        );
+    }
+
+    #[test]
+    fn view_layout_split_picks_sensible_partner_view() {
+        let area = Rect { x: 0, y: 0, width: 120, height: 30 };
+        // Map pairs with Comms.
+        let r = view_layout(area, ViewKind::Map, PaneLock::Split(Side::Left));
+        assert_eq!(r.primary.view, ViewKind::Map);
+        assert_eq!(r.secondary.view, ViewKind::Comms);
+        // Comms pairs with Map.
+        let r = view_layout(area, ViewKind::Comms, PaneLock::Split(Side::Left));
+        assert_eq!(r.secondary.view, ViewKind::Map);
+        // Defcon pairs with Threats and vice versa.
+        let r = view_layout(area, ViewKind::Defcon, PaneLock::Split(Side::Left));
+        assert_eq!(r.secondary.view, ViewKind::Threats);
+        let r = view_layout(area, ViewKind::Threats, PaneLock::Split(Side::Left));
+        assert_eq!(r.secondary.view, ViewKind::Defcon);
+    }
+
+    #[test]
+    fn view_layout_split_fits_inside_area_at_medium_and_wide() {
+        for w in [100u16, 120, 160, 200] {
+            let area = Rect { x: 0, y: 0, width: w, height: 30 };
+            let r = view_layout(area, ViewKind::Map, PaneLock::Split(Side::Left));
+            // Primary + divider + secondary span the body exactly.
+            assert_eq!(
+                r.primary.area.x + r.primary.area.width + r.divider.width
+                    + r.secondary.area.width,
+                area.width,
+                "width={w}: panes don't span area"
+            );
+            // No negative origins or overflow.
+            assert!(r.primary.area.x + r.primary.area.width <= area.width);
+            assert!(r.secondary.area.x + r.secondary.area.width <= area.width);
+        }
+    }
+
+    #[test]
+    fn view_layout_split_handles_zero_width_area() {
+        let area = Rect { x: 0, y: 0, width: 0, height: 30 };
+        let r = view_layout(area, ViewKind::Map, PaneLock::Split(Side::Left));
+        assert_eq!(r.primary.area.width, 0);
+        assert_eq!(r.secondary.area.width, 0);
+    }
+
+    #[test]
+    fn view_rect_empty_is_zero_sized() {
+        let v = ViewRect::empty(ViewKind::Map);
+        assert_eq!(v.view, ViewKind::Map);
+        assert_eq!(v.area, Rect::new(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn pane_lock_default_is_split_left() {
+        assert_eq!(PaneLock::default(), PaneLock::Split(Side::Left));
+    }
+
+    #[test]
+    fn view_kind_labels_are_uppercase_short_strings() {
+        // Invariants so the tab strip renderer never has to defend
+        // against multi-byte or unusually long labels.
+        for v in [
+            ViewKind::Map,
+            ViewKind::Comms,
+            ViewKind::Defcon,
+            ViewKind::Threats,
+            ViewKind::Settings,
+        ] {
+            let label = v.label();
+            assert!(label.len() <= 10, "label too long for {v:?}: {label}");
+            assert!(
+                label.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                "label not uppercase for {v:?}: {label}"
+            );
+        }
     }
 }

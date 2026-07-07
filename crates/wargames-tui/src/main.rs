@@ -7,6 +7,7 @@
 mod app;
 mod config;
 mod llm;
+mod login;
 mod net;
 mod panes;
 mod picker;
@@ -15,12 +16,16 @@ mod splash;
 mod text;
 mod theme;
 mod tts;
+mod ui_anim;
 mod widget_action;
+mod widget_comms;
+mod widget_defcon;
 mod widget_log;
 mod widget_predict;
 mod widget_radar;
 mod widget_spinner;
 mod widget_state;
+mod widget_world;
 
 use app::{App, KeyCode, Screen};
 use clap::Parser;
@@ -312,6 +317,13 @@ let rt = Runtime::new().expect("tokio runtime");
                     return std::process::ExitCode::SUCCESS;
                 }
                 let quit = match app.screen {
+                    Screen::Login => {
+                        let character = match code {
+                            KeyCode::Char(c) => Some(c),
+                            _ => None,
+                        };
+                        app.handle_login_key(code, character)
+                    }
                     Screen::Picker => app.handle_picker_key(code),
                     Screen::Game => app.handle_game_key(code),
                     Screen::Settings => app.handle_settings_key(code),
@@ -327,9 +339,11 @@ let rt = Runtime::new().expect("tokio runtime");
             }
         }
 
-        // 4) Splash countdown.
-        if app.screen == Screen::Splash {
-            app.tick_splash();
+        // 4) Splash countdown + login typewriter.
+        match app.screen {
+            Screen::Splash => app.tick_splash(),
+            Screen::Login => app.tick_login(),
+            _ => {}
         }
     }
 }
@@ -351,6 +365,7 @@ mod event {
                 crossterm::event::KeyCode::Esc => KeyCode::Esc,
                 crossterm::event::KeyCode::Tab => KeyCode::Tab,
                 crossterm::event::KeyCode::BackTab => KeyCode::BackTab,
+                crossterm::event::KeyCode::Backspace => KeyCode::Backspace,
                 crossterm::event::KeyCode::PageUp => KeyCode::PageUp,
                 crossterm::event::KeyCode::PageDown => KeyCode::PageDown,
                 crossterm::event::KeyCode::Home => KeyCode::Home,

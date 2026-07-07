@@ -7,7 +7,11 @@
 
 use crate::config::BlumiSettings;
 use crate::llm::LlmClient;
-use crate::panes::{game_layout, Breakpoint, GameRects, PaneKind};
+use crate::login::{LoginState, Phase, render_login};
+use crate::panes::{
+    game_layout, view_layout, Breakpoint, GameRects, PaneKind, PaneLock, ViewKind,
+};
+use crate::panes::Side as PaneSide;
 use crate::picker::{
     default_countries, render_picker, Picker, PickerStep, ScenarioEntry,
 };
@@ -36,6 +40,8 @@ use wargames_core::WorldState;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Screen {
+    /// WOPR-style Joshua auth gate. First thing the user sees.
+    Login,
     Splash,
     Picker,
     Game,
@@ -104,7 +110,19 @@ impl BgOp {
 /// WorldState, and the (optional) LLM/TTS clients.
 pub struct App {
     pub screen: Screen,
+    /// Joshua login state. Only meaningful while `screen == Login`.
+    /// Lives on `App` (not a local in `render`) so the typewriter
+    /// cursor keeps advancing across redraws without re-arming.
+    pub login: LoginState,
     pub splash_started_at: Instant,
+    /// Active tab-cyclable view in `Screen::Game`. Defaults to
+    /// `ViewKind::Map` so the first thing the user sees after
+    /// login is the world map.
+    pub active_view: ViewKind,
+    /// Whether the game body is split (two views side-by-side)
+    /// or full (one view full-width). The player toggles this
+    /// by pressing Enter on the active tab.
+    pub pane_lock: PaneLock,
     pub picker: Picker,
     pub action_list: ListState,
     pub world: Option<WorldState>,
@@ -210,8 +228,11 @@ impl App {
             None => "no LLM in settings — opponent will use heuristic".to_string(),
         };
         Self {
-            screen: Screen::Splash,
+            screen: Screen::Login,
+            login: LoginState::new(),
             splash_started_at: Instant::now(),
+            active_view: ViewKind::Map,
+            pane_lock: PaneLock::default(),
             picker,
             action_list,
             world: None,
@@ -756,13 +777,38 @@ impl App {
         // even in AI vs AI and even during background work — the user
         // should never be locked out of inspecting a pane by a pending
         // prediction or LLM call.
+        //
+        // Tab also advances the high-level ViewKind cycle (Map →
+        // Comms → Defcon → Threats), which is what the game-body
+        // `view_layout` actually consults at Medium/Wide breakpoints.
+        // The legacy `PaneKind` cycle is kept in sync for callers
+        // that still read `active_pane`.
         match code {
             KeyCode::Tab => {
-                self.active_pane = self.active_pane.next();
+                self.active_view = self.active_view.next();
+                self.active_pane = Self::view_to_pane(self.active_view);
+                // Tabs always enter Split mode so the user sees two
+                // views at once — Enter then expands to Full.
+                if matches!(self.pane_lock, PaneLock::Full(_)) {
+                    self.pane_lock = PaneLock::Split(PaneSide::Left);
+                }
                 return false;
             }
             KeyCode::BackTab => {
-                self.active_pane = self.active_pane.prev();
+                self.active_view = self.active_view.prev();
+                self.active_pane = Self::view_to_pane(self.active_view);
+                if matches!(self.pane_lock, PaneLock::Full(_)) {
+                    self.pane_lock = PaneLock::Split(PaneSide::Left);
+                }
+                return false;
+            }
+            KeyCode::Enter => {
+                // Enter toggles Split ↔ Full on the active view, like
+                // a window manager's "maximize" gesture.
+                self.pane_lock = match self.pane_lock {
+                    PaneLock::Full(_) => PaneLock::Split(PaneSide::Left),
+                    PaneLock::Split(_) => PaneLock::Full(self.active_view),
+                };
                 return false;
             }
             _ => {}
@@ -910,6 +956,78 @@ impl App {
                 false
             }
             _ => false,
+        }
+    }
+
+    /// Handle a keypress while `Screen::Login` is active.
+    ///
+    /// Returns `true` when the user wants to quit the entire
+    /// program (Esc), and `false` otherwise — mirroring the
+    /// convention used by the other `handle_*_key` methods.
+    ///
+    /// `character` is the actual character that came off the
+    /// terminal (already decoded from the key event by the run
+    /// loop). We take it as a separate parameter so we don't
+    /// depend on crossterm here — this module is test-friendly
+    /// and the `KeyCode::Char(c)` translation already happens
+    /// in `main.rs`.
+    pub fn handle_login_key(&mut self, code: KeyCode, character: Option<char>) -> bool {
+        match code {
+            KeyCode::Esc => return true,
+            KeyCode::Enter => {
+                self.login.submit();
+            }
+            KeyCode::Backspace => {
+                self.login.backspace();
+            }
+            KeyCode::Char(_) => {
+                if let Some(c) = character {
+                    // The login field is buffered as plain ASCII;
+                    // any non-printable / control character (other
+                    // than the named keys above) is silently
+                    // dropped, which mirrors how WOPR_TUI_2026's
+                    // login prompt behaved.
+                    if !c.is_control() {
+                        self.login.push_char(c);
+                    }
+                }
+            }
+            _ => {}
+        }
+        // If the login typewriter just finished its greeting,
+        // advance to Picker so the user can pick a country /
+        // scenario.
+        if self.login.done && self.screen == Screen::Login {
+            self.screen = Screen::Picker;
+        }
+        false
+    }
+
+    /// One render-tick of the login typewriter. Called from the
+    /// run loop at the same cadence as `tick_splash`. Cheap —
+    /// just advances `LoginState.line_index` on the right phase.
+    pub fn tick_login(&mut self) {
+        self.login.advance_tick();
+        // Catch the case where the greeting finishes mid-tick
+        // (no Enter required to start the greeting typewriter —
+        // the WOPR script auto-advances once the user types
+        // "Joshua" and submits).
+        if self.login.done && self.screen == Screen::Login {
+            self.screen = Screen::Picker;
+        }
+    }
+
+    /// Convenience: translate a `ViewKind` into the legacy
+    /// `PaneKind` used by the Compact-mode cycle. Exists only to
+    /// keep the old `render_compact_game` happy while the new
+    /// `view_layout` consults `ViewKind` directly.
+    fn view_to_pane(view: ViewKind) -> PaneKind {
+        match view {
+            ViewKind::Map => PaneKind::State,
+            ViewKind::Comms => PaneKind::State,
+            ViewKind::Defcon => PaneKind::Predict,
+            ViewKind::Threats => PaneKind::Radar,
+            ViewKind::Settings => PaneKind::State,
         }
     }
 
@@ -1245,6 +1363,9 @@ impl App {
             let _ = self.step_ai_vs_ai();
         }
         match self.screen {
+            Screen::Login => {
+                render_login(frame, frame.area(), &self.login);
+            }
             Screen::Splash => {
                 let secs_left = (5u8).saturating_sub(
                     self.splash_started_at.elapsed().as_secs().min(5) as u8,
@@ -1721,6 +1842,8 @@ pub enum KeyCode {
     Tab,
     /// Shift+Tab (crossterm surfaces this as `BackTab`).
     BackTab,
+    /// Backspace — login field editor and any future text input.
+    Backspace,
     /// Page up — event-log paging in the game screen.
     PageUp,
     /// Page down — event-log paging in the game screen.
@@ -3115,5 +3238,152 @@ mod playable_flow_tests {
         assert_eq!(parse_action_str(""), None);
         assert_eq!(parse_action_str("  "), None);
         assert_eq!(parse_action_str("not_an_action"), None);
+    }
+
+    // ─── Login end-to-end tests ─────────────────────────────────────
+    //
+    // Verifies the wiring: `App::new` lands on `Screen::Login`,
+    // `handle_login_key` accepts "Joshua" / "joshua" and rejects
+    // everything else, and successful auth advances the screen to
+    // `Screen::Picker`.
+
+    mod login_tests {
+        use super::{App, KeyCode, PaneLock, PaneSide, Screen, ViewKind};
+        use crate::config::BlumiSettings;
+        use std::path::PathBuf;
+
+        fn fresh_app_for_login() -> App {
+            // `BlumiSettings` doesn't implement `Default`, so build a
+            // minimal one from the inner `Default` impls of its fields.
+            // Tests don't need a working LLM — they only exercise the
+            // login wiring, which never touches the router or voice.
+            let settings = BlumiSettings {
+                providers: Default::default(),
+                router: Default::default(),
+                voice: None,
+            };
+            App::new(settings, PathBuf::from("/tmp"))
+        }
+
+        #[test]
+        fn app_new_starts_on_login_screen() {
+            let app = fresh_app_for_login();
+            assert_eq!(app.screen, Screen::Login);
+            assert!(!app.login.done, "fresh login must not be done");
+            assert!(app.login.buffer.is_empty());
+        }
+
+        #[test]
+        fn wrong_password_keeps_user_on_login_screen() {
+            let mut app = fresh_app_for_login();
+            for c in "wrong".chars() {
+                app.handle_login_key(KeyCode::Char(c), Some(c));
+            }
+            app.handle_login_key(KeyCode::Enter, None);
+            // The login typewriter is now in Wrong phase; the
+            // screen stays Login until the rejection script
+            // finishes and the state resets to Prompt. After a
+            // lot of ticks it must NOT advance to Picker.
+            for _ in 0..1500 {
+                app.tick_login();
+            }
+            assert_eq!(app.screen, Screen::Login, "wrong password must not unlock");
+            assert!(!app.login.done, "login.done must stay false on wrong password");
+        }
+
+        #[test]
+        fn correct_password_joshua_advances_to_picker() {
+            let mut app = fresh_app_for_login();
+            for c in "Joshua".chars() {
+                app.handle_login_key(KeyCode::Char(c), Some(c));
+            }
+            app.handle_login_key(KeyCode::Enter, None);
+            for _ in 0..1500 {
+                app.tick_login();
+                if app.screen == Screen::Picker {
+                    break;
+                }
+            }
+            assert_eq!(
+                app.screen,
+                Screen::Picker,
+                "correct Joshua must advance to Picker"
+            );
+        }
+
+        #[test]
+        fn correct_password_lowercase_joshua_accepted() {
+            let mut app = fresh_app_for_login();
+            for c in "joshua".chars() {
+                app.handle_login_key(KeyCode::Char(c), Some(c));
+            }
+            app.handle_login_key(KeyCode::Enter, None);
+            for _ in 0..1500 {
+                app.tick_login();
+                if app.screen == Screen::Picker {
+                    break;
+                }
+            }
+            assert_eq!(app.screen, Screen::Picker);
+        }
+
+        #[test]
+        fn escape_during_login_quits_app() {
+            let mut app = fresh_app_for_login();
+            let quit = app.handle_login_key(KeyCode::Esc, None);
+            assert!(quit, "Esc on Login must signal quit");
+        }
+
+        #[test]
+        fn backspace_removes_last_char() {
+            let mut app = fresh_app_for_login();
+            for c in "abc".chars() {
+                app.handle_login_key(KeyCode::Char(c), Some(c));
+            }
+            assert_eq!(app.login.buffer, "abc");
+            app.handle_login_key(KeyCode::Backspace, None);
+            assert_eq!(app.login.buffer, "ab");
+        }
+
+        #[test]
+        fn tab_cycle_on_game_advances_view_kind_and_resets_split() {
+            let mut app = fresh_app_for_login();
+            app.login.done = true;
+            app.screen = Screen::Game;
+            app.active_view = ViewKind::Map;
+            app.pane_lock = PaneLock::Full(ViewKind::Map);
+            app.handle_game_key(KeyCode::Tab);
+            assert_eq!(app.active_view, ViewKind::Comms);
+            // Tab always re-enters Split mode so the user sees
+            // both views side-by-side.
+            assert!(matches!(app.pane_lock, PaneLock::Split(_)));
+        }
+
+        #[test]
+        fn backtab_cycle_on_game_wraps_backwards() {
+            let mut app = fresh_app_for_login();
+            app.login.done = true;
+            app.screen = Screen::Game;
+            app.active_view = ViewKind::Map;
+            app.handle_game_key(KeyCode::BackTab);
+            assert_eq!(
+                app.active_view,
+                ViewKind::Threats,
+                "BackTab from Map must wrap to Threats (last in cycle)"
+            );
+        }
+
+        #[test]
+        fn enter_on_game_toggles_split_and_full() {
+            let mut app = fresh_app_for_login();
+            app.login.done = true;
+            app.screen = Screen::Game;
+            app.active_view = ViewKind::Map;
+            app.pane_lock = PaneLock::Split(PaneSide::Left);
+            app.handle_game_key(KeyCode::Enter);
+            assert!(matches!(app.pane_lock, PaneLock::Full(ViewKind::Map)));
+            app.handle_game_key(KeyCode::Enter);
+            assert!(matches!(app.pane_lock, PaneLock::Split(_)));
+        }
     }
 }
