@@ -75,19 +75,17 @@ pub fn render(frame: &mut Frame, frame_area: Rect, frame_idx: usize) {
     let theme = theme::current();
     let glyph = braille_at(frame_idx).to_string();
     let label = format!("{glyph} {}", POPUP_LABEL);
-    // Border in the warn colour (theme.accent_warn -> status_warn: the
-    // same warn-amber field `widget_spinner` uses for its LLM-call
-    // box border; `accent_warn` doesn't exist in the Theme struct).
+    // Border in the warn colour; padded pane background uses
+    // `theme.background` to match the spec's `pane_bg` intent.
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.status_warn));
+        .border_style(Style::default().fg(theme.status_warn))
+        .style(Style::default().bg(theme.background));
     let paragraph = Paragraph::new(Line::from(Span::styled(
         label,
-        // No `.bg(...)` set: `theme.pane_bg` doesn't exist and the
-        // codebase convention (widget_log / widget_comms / widget_spinner)
-        // is to leave the block background unset so the terminal's own
-        // background shows through.
-        Style::default().fg(theme.status_text),
+        Style::default()
+            .fg(theme.status_text)
+            .bg(theme.background),
     )))
     .block(block);
     frame.render_widget(paragraph, area);

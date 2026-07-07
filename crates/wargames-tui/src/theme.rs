@@ -50,6 +50,10 @@ pub struct Theme {
     pub border: Color,
     /// Borders around inactive / dim panes.
     pub border_inactive: Color,
+    /// Optional pane / padding background. Defaults to `Color::Reset`
+    /// (terminal default). Most themes leave it Reset; themes with
+    /// a panel fill paint it here.
+    pub background: Color,
 
     // -- titles + status line ------------------------------------------
     /// Pane / banner titles.
@@ -295,6 +299,7 @@ pub fn og_wopr() -> Theme {
         label: "OG WOPR",
         border: Color::Green,
         border_inactive: Color::DarkGray,
+        background: Color::Reset,
         title: Color::Green,
         status_text: Color::White,
         status_warn: Color::Yellow,
@@ -348,6 +353,7 @@ pub fn cyberpunk_2077() -> Theme {
         label: "Cyberpunk 2077",
         border: Color::Rgb(255, 0, 64),       // #ff003f cyber-punk red
         border_inactive: Color::Rgb(60, 0, 30),
+        background: Color::Reset,
         title: Color::Rgb(0, 240, 255),       // neon cyan
         status_text: Color::White,
         status_warn: Color::Rgb(247, 0, 255), // magenta
@@ -401,6 +407,7 @@ pub fn tron() -> Theme {
         label: "Tron",
         border: Color::Rgb(11, 210, 255),       // #0bd2ff cyan-blue
         border_inactive: Color::Rgb(20, 60, 90),
+        background: Color::Reset,
         title: Color::Rgb(11, 210, 255),
         status_text: Color::White,
         status_warn: Color::Rgb(251, 146, 60), // neon orange
@@ -454,6 +461,7 @@ pub fn vscode_dark_plus() -> Theme {
         label: "VS Code Dark+",
         border: Color::Rgb(86, 156, 214),       // #569cd6 keyword blue
         border_inactive: Color::Rgb(60, 80, 100),
+        background: Color::Reset,
         title: Color::Rgb(86, 156, 214),
         status_text: Color::Rgb(212, 212, 212), // #d4d4d4 foreground
         status_warn: Color::Rgb(206, 145, 120), // #ce9178 string
@@ -507,6 +515,7 @@ pub fn vscode_monokai() -> Theme {
         label: "VS Code Monokai",
         border: Color::Rgb(249, 38, 114),     // #f92672 pink
         border_inactive: Color::Rgb(80, 50, 70),
+        background: Color::Reset,
         title: Color::Rgb(249, 38, 114),
         status_text: Color::Rgb(248, 248, 242), // #f8f8f2 foreground
         status_warn: Color::Rgb(253, 151, 31),  // #fd971f orange
@@ -560,6 +569,7 @@ pub fn solarized_dark() -> Theme {
         label: "Solarized Dark",
         border: Color::Rgb(38, 139, 210),       // blue
         border_inactive: Color::Rgb(50, 60, 70),
+        background: Color::Reset,
         title: Color::Rgb(38, 139, 210),
         status_text: Color::Rgb(147, 161, 161), // #93a1a1 base1
         status_warn: Color::Rgb(220, 145, 60),
@@ -613,6 +623,7 @@ pub fn synthwave_84() -> Theme {
         label: "Synthwave '84",
         border: Color::Rgb(255, 121, 198),     // #ff79c6 magenta
         border_inactive: Color::Rgb(80, 50, 90),
+        background: Color::Reset,
         title: Color::Rgb(128, 255, 232),      // #80ffe8 cyan
         status_text: Color::White,
         status_warn: Color::Rgb(241, 250, 140), // #f1fa8c pale yellow
@@ -666,6 +677,7 @@ pub fn dracula() -> Theme {
         label: "Dracula",
         border: Color::Rgb(189, 147, 249), // #bd93f9 purple
         border_inactive: Color::Rgb(70, 60, 90),
+        background: Color::Reset,
         title: Color::Rgb(189, 147, 249),
         status_text: Color::Rgb(248, 248, 242), // #f8f8f2 foreground
         status_warn: Color::Rgb(255, 121, 198), // #ff79c6 pink
