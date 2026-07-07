@@ -802,9 +802,12 @@ impl App {
                 }
                 return false;
             }
-            KeyCode::Enter => {
-                // Enter toggles Split ↔ Full on the active view, like
-                // a window manager's "maximize" gesture.
+            KeyCode::Char('m') | KeyCode::Char('M') => {
+                // Toggle Split ↔ Full on the active view, like a window
+                // manager's "maximize" gesture. Bound to `m` (not
+                // Enter) so Enter remains the muscle-memory key for
+                // committing the highlighted action — see
+                // `commit_action` below.
                 self.pane_lock = match self.pane_lock {
                     PaneLock::Full(_) => PaneLock::Split(PaneSide::Left),
                     PaneLock::Split(_) => PaneLock::Full(self.active_view),
@@ -839,6 +842,16 @@ impl App {
                 KeyCode::Esc => true,
                 KeyCode::Char('p') | KeyCode::Char('P') => {
                     self.refresh_prediction();
+                    false
+                }
+                KeyCode::Char('m') | KeyCode::Char('M') => {
+                    // PaneLock toggle still works in AI vs AI mode so
+                    // the user can inspect a single view without
+                    // interrupting the simulation.
+                    self.pane_lock = match self.pane_lock {
+                        PaneLock::Full(_) => PaneLock::Split(PaneSide::Left),
+                        PaneLock::Split(_) => PaneLock::Full(self.active_view),
+                    };
                     false
                 }
                 _ => false,
@@ -3374,15 +3387,38 @@ mod playable_flow_tests {
         }
 
         #[test]
-        fn enter_on_game_toggles_split_and_full() {
+        fn enter_on_game_no_longer_toggles_pane_lock() {
+            // The Enter key used to toggle PaneLock — that broke
+            // the muscle-memory "Enter commits action" contract.
+            // PaneLock toggle now lives on `m`. This test pins the
+            // new behavior so a future refactor can't silently
+            // re-bind Enter to view manipulation.
             let mut app = fresh_app_for_login();
             app.login.done = true;
             app.screen = Screen::Game;
             app.active_view = ViewKind::Map;
             app.pane_lock = PaneLock::Split(PaneSide::Left);
+            let before = matches!(app.pane_lock, PaneLock::Split(_));
             app.handle_game_key(KeyCode::Enter);
+            assert!(
+                matches!(app.pane_lock, PaneLock::Split(_)) == before,
+                "Enter must NOT toggle PaneLock — that binding now lives on `m`"
+            );
+        }
+
+        #[test]
+        fn m_key_on_game_toggles_split_and_full() {
+            // PaneLock toggle moved from Enter to `m`. This test
+            // replaces the old `enter_on_game_toggles_split_and_full`
+            // and pins the new binding.
+            let mut app = fresh_app_for_login();
+            app.login.done = true;
+            app.screen = Screen::Game;
+            app.active_view = ViewKind::Map;
+            app.pane_lock = PaneLock::Split(PaneSide::Left);
+            app.handle_game_key(KeyCode::Char('m'));
             assert!(matches!(app.pane_lock, PaneLock::Full(ViewKind::Map)));
-            app.handle_game_key(KeyCode::Enter);
+            app.handle_game_key(KeyCode::Char('M'));
             assert!(matches!(app.pane_lock, PaneLock::Split(_)));
         }
     }
