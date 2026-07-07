@@ -4,6 +4,13 @@
 //! clearing the status line and the action menu.
 
 use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Frame;
+
+use crate::theme;
+use crate::widget_spinner::braille_at;
 
 /// Label rendered inside the popup. The literal text — emoji
 /// ellipsis is intentional (matches the WOPR-tone verb phase
@@ -56,6 +63,34 @@ fn popup_width() -> u16 {
 /// Total popup height (1 content row + 2 border rows).
 fn popup_height() -> u16 {
     3
+}
+
+/// Render the popup on top of whatever's already in `frame`.
+/// No-op when `centered_rect` returned a degenerate area.
+pub fn render(frame: &mut Frame, frame_area: Rect, frame_idx: usize) {
+    let area = centered_rect(frame_area);
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let theme = theme::current();
+    let glyph = braille_at(frame_idx).to_string();
+    let label = format!("{glyph} {}", POPUP_LABEL);
+    // Border in the warn colour (theme.accent_warn -> status_warn: the
+    // same warn-amber field `widget_spinner` uses for its LLM-call
+    // box border; `accent_warn` doesn't exist in the Theme struct).
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.status_warn));
+    let paragraph = Paragraph::new(Line::from(Span::styled(
+        label,
+        // No `.bg(...)` set: `theme.pane_bg` doesn't exist and the
+        // codebase convention (widget_log / widget_comms / widget_spinner)
+        // is to leave the block background unset so the terminal's own
+        // background shows through.
+        Style::default().fg(theme.status_text),
+    )))
+    .block(block);
+    frame.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
@@ -117,5 +152,56 @@ mod tests {
         // "borders add 2 rows" so a future change to either
         // MIN_POPUP_HEIGHT or popup_height() must be conscious.
         assert_eq!(popup_height(), MIN_POPUP_HEIGHT - 1);
+    }
+
+    use crate::widget_spinner::braille_at;
+    use ratatui::backend::TestBackend;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    fn render_to_string(width: u16, height: u16, frame_idx: usize) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::with_options(
+            backend,
+            TerminalOptions { viewport: Viewport::Fullscreen },
+        )
+        .expect("terminal");
+        terminal
+            .draw(|f| render(f, f.area(), frame_idx))
+            .expect("render");
+        let buf = terminal.backend().buffer().clone();
+        let mut s = String::new();
+        use unicode_width::UnicodeWidthChar;
+        for y in 0..buf.area.height {
+            let mut x = 0u16;
+            while x < buf.area.width {
+                let cell = &buf[(x, y)];
+                let symbol = cell.symbol();
+                let mut width = 0u16;
+                for c in symbol.chars() {
+                    width += UnicodeWidthChar::width(c).unwrap_or(0) as u16;
+                }
+                s.push_str(symbol);
+                if width > 1 {
+                    x += width;
+                } else {
+                    x += 1;
+                }
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn render_paints_braille_glyph_and_label() {
+        let s = render_to_string(80, 24, 0);
+        let glyph = braille_at(0).to_string();
+        assert!(s.contains(&glyph), "braille glyph missing: {s}");
+        assert!(s.contains("RECEIVING OPPONENT RESPONSE…"));
+    }
+
+    #[test]
+    fn render_is_noop_on_subminimum_frame() {
+        let s = render_to_string(MIN_POPUP_WIDTH - 1, 24, 0);
+        assert!(!s.contains("RECEIVING OPPONENT RESPONSE…"));
     }
 }
